@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "frontend",
+    "name": "CardVault",
     "slug": "frontend",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -10,15 +10,20 @@
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.emergent.ocrcontactshub.il4pkf"
+      "bundleIdentifier": "com.emergent.ocrcontactshub.il4pkf",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Scan business cards with the camera",
+        "NSPhotoLibraryUsageDescription": "Import business card photos from your library"
+      }
     },
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/images/adaptive-icon.png",
-        "backgroundColor": "#000000"
+        "backgroundColor": "#0F172A"
       },
       "edgeToEdgeEnabled": true,
-      "package": "com.emergent.ocrcontactshub.il4pkf"
+      "package": "com.emergent.ocrcontactshub.il4pkf",
+      "permissions": ["CAMERA", "READ_EXTERNAL_STORAGE"]
     },
     "web": {
       "bundler": "metro",
@@ -33,7 +38,19 @@
           "image": "./assets/images/splash-image.png",
           "imageWidth": 200,
           "resizeMode": "contain",
-          "backgroundColor": "#000000"
+          "backgroundColor": "#0F172A"
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Scan business cards with the camera"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Import business card photos from your library"
         }
       ]
     ],

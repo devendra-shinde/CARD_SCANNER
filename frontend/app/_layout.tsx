@@ -1,14 +1,15 @@
-import { Stack } from "expo-router";
+import { Stack, useRouter, useSegments } from "expo-router";
 import * as SplashScreen from "expo-splash-screen";
+import { StatusBar } from "expo-status-bar";
 import { useEffect } from "react";
 import { LogBox } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 
+import { AuthProvider, useAuth } from "@/src/context/auth";
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
 
-
-// Disable logbox errors etc so that users can see the app
-// and agent works as expected.
-LogBox.ignoreAllLogs(true)
+LogBox.ignoreAllLogs(true);
 
 // Keep the native splash visible from cold start until icon fonts register.
 // Required because @expo/vector-icons' componentDidMount fallback fires
@@ -16,18 +17,44 @@ LogBox.ignoreAllLogs(true)
 // the family is registered — which throws on Android Expo Go.
 SplashScreen.preventAutoHideAsync();
 
+function RouterGate() {
+  const { user, loading } = useAuth();
+  const segments = useSegments();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (loading) return;
+    const inAuthGroup = segments[0] === "(auth)";
+    const inTabsGroup = segments[0] === "(tabs)";
+    if (!user && !inAuthGroup) {
+      router.replace("/(auth)/welcome");
+    } else if (user && (inAuthGroup || segments.length === 0)) {
+      router.replace("/(tabs)");
+    } else if (user && !inTabsGroup && segments.length === 0) {
+      router.replace("/(tabs)");
+    }
+  }, [user, loading, segments, router]);
+
+  return <Stack screenOptions={{ headerShown: false, animation: "slide_from_right" }} />;
+}
+
 export default function RootLayout() {
   const [loaded, error] = useIconFonts();
 
   useEffect(() => {
-    if (loaded || error) {
-      SplashScreen.hideAsync();
-    }
+    if (loaded || error) SplashScreen.hideAsync();
   }, [loaded, error]);
 
-  // If the CDN is unreachable we fall through on error rather than wedging
-  // the app — icons will tofu, but the app still boots.
   if (!loaded && !error) return null;
 
-  return <Stack screenOptions={{ headerShown: false }} />;
+  return (
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <AuthProvider>
+          <StatusBar style="dark" />
+          <RouterGate />
+        </AuthProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
+  );
 }
