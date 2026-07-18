@@ -8,6 +8,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { AuthProvider, useAuth } from "@/src/context/auth";
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
+import { I18nProvider, useI18n } from "@/src/i18n";
 
 LogBox.ignoreAllLogs(true);
 
@@ -19,21 +20,33 @@ SplashScreen.preventAutoHideAsync();
 
 function RouterGate() {
   const { user, loading } = useAuth();
+  const { onboarded, ready: i18nReady } = useI18n();
   const segments = useSegments();
   const router = useRouter();
 
   useEffect(() => {
-    if (loading) return;
-    const inAuthGroup = segments[0] === "(auth)";
-    const inTabsGroup = segments[0] === "(tabs)";
-    if (!user && !inAuthGroup) {
-      router.replace("/(auth)/welcome");
-    } else if (user && (inAuthGroup || segments.length === 0)) {
-      router.replace("/(tabs)");
-    } else if (user && !inTabsGroup && segments.length === 0) {
-      router.replace("/(tabs)");
+    if (loading || !i18nReady) return;
+    const first = segments[0];
+    const inAuthGroup = first === "(auth)";
+    const inTabsGroup = first === "(tabs)";
+    const onLangScreen = segments.join("/").includes("settings/language");
+
+    // First-run: force language picker before anything else.
+    if (!onboarded && !onLangScreen) {
+      router.replace("/settings/language");
+      return;
     }
-  }, [user, loading, segments, router]);
+
+    if (onboarded) {
+      if (!user && !inAuthGroup && !onLangScreen) {
+        router.replace("/(auth)/welcome");
+      } else if (user && (inAuthGroup || segments.length === 0)) {
+        router.replace("/(tabs)");
+      } else if (user && !inTabsGroup && segments.length === 0) {
+        router.replace("/(tabs)");
+      }
+    }
+  }, [user, loading, segments, router, onboarded, i18nReady]);
 
   return <Stack screenOptions={{ headerShown: false, animation: "slide_from_right" }} />;
 }
@@ -50,10 +63,12 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <AuthProvider>
-          <StatusBar style="dark" />
-          <RouterGate />
-        </AuthProvider>
+        <I18nProvider>
+          <AuthProvider>
+            <StatusBar style="dark" />
+            <RouterGate />
+          </AuthProvider>
+        </I18nProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
   );

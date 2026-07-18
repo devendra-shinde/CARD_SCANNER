@@ -3,10 +3,12 @@ import { Image, StyleSheet, Text, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 
 import { Button, Screen } from "@/src/components/ui";
+import { useT } from "@/src/i18n";
 import { colors, radius, spacing, typography } from "@/src/theme";
 
 export default function Welcome() {
   const router = useRouter();
+  const t = useT();
   return (
     <Screen edges={["top", "bottom"]}>
       <View style={styles.hero}>
@@ -21,25 +23,23 @@ export default function Welcome() {
         />
         <View style={styles.badge}>
           <View style={styles.badgeDot} />
-          <Text style={styles.badgeText}>CARDVAULT</Text>
+          <Text style={styles.badgeText}>{t("app_name").toUpperCase()}</Text>
         </View>
       </View>
 
       <View style={styles.content}>
-        <Text style={styles.title}>Every card, forever organized.</Text>
-        <Text style={styles.subtitle}>
-          Scan business cards, auto-enrich contacts, and run smart email campaigns — all in one paperless workspace.
-        </Text>
+        <Text style={styles.title}>{t("welcome_hero")}</Text>
+        <Text style={styles.subtitle}>{t("welcome_sub")}</Text>
 
         <View style={{ height: spacing.lg }} />
         <Button
-          title="Get started — it's free"
+          title={t("welcome_get_started")}
           onPress={() => router.push("/(auth)/signup")}
           testID="welcome-signup-btn"
         />
         <View style={{ height: spacing.sm }} />
         <Button
-          title="I already have an account"
+          title={t("welcome_have_account")}
           variant="ghost"
           onPress={() => router.push("/(auth)/login")}
           testID="welcome-login-btn"

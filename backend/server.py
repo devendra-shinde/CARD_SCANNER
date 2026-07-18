@@ -1,8 +1,10 @@
 """CardVault backend — Business Card OCR & Smart Contact Management."""
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -26,7 +28,24 @@ from auth_utils import (  # noqa: E402
 )
 from email_utils import otp_email_html, send_smtp, send_system_email  # noqa: E402
 from enrich_utils import scrape_website  # noqa: E402
-from ocr_utils import scan_business_card  # noqa: E402
+from ocr_utils import OcrError, scan_business_card  # noqa: E402
+
+
+def _normalize_tags(tags: list[str] | None) -> list[str]:
+    """Lower-case + strip + de-dupe (preserves order)."""
+    if not tags:
+        return []
+    seen: set = set()
+    out: list[str] = []
+    for t in tags:
+        if not t:
+            continue
+        norm = str(t).strip().lower()
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        out.append(norm)
+    return out
 
 # ────────────────────────────  DB  ────────────────────────────
 mongo_url = os.environ["MONGO_URL"]
@@ -181,6 +200,12 @@ class CampaignIn(BaseModel):
     subject: str
     body_html: str
     recipient_ids: List[str] = []
+    filter_tags: List[str] = []
+    filter_industries: List[str] = []
+    filter_countries: List[str] = []
+    filter_states: List[str] = []
+    filter_cities: List[str] = []
+    # Legacy singletons kept for backward compat
     filter_tag: Optional[str] = None
     filter_industry: Optional[str] = None
 
@@ -380,6 +405,7 @@ async def me(user_id: str = Depends(get_current_user_id)):
 async def create_contact(body: ContactIn, user_id: str = Depends(get_current_user_id)):
     cid = str(uuid.uuid4())
     doc = body.model_dump()
+    doc["tags"] = _normalize_tags(doc.get("tags"))
     doc.update({
         "id": cid,
         "user_id": user_id,
@@ -394,20 +420,43 @@ async def create_contact(body: ContactIn, user_id: str = Depends(get_current_use
 async def list_contacts(
     user_id: str = Depends(get_current_user_id),
     search: Optional[str] = None,
-    tag: Optional[str] = None,
-    industry: Optional[str] = None,
+    tag: Optional[str] = None,   # single-tag legacy; comma-separated also accepted
+    tags: Optional[str] = None,  # comma-separated multi-select
+    industry: Optional[str] = None,   # comma-separated multi-select
     company: Optional[str] = None,
+    country: Optional[str] = None,    # comma-separated
+    state: Optional[str] = None,      # comma-separated
+    city: Optional[str] = None,       # comma-separated
     favorite: Optional[bool] = None,
     sort: str = "recent",  # recent | name | company
     limit: int = 500,
 ):
     q: Dict[str, Any] = {"user_id": user_id}
-    if tag:
-        q["tags"] = tag
-    if industry:
-        q["industry"] = industry
+
+    def _multi(val: Optional[str]) -> Optional[list[str]]:
+        if not val:
+            return None
+        parts = [v.strip() for v in str(val).split(",") if v.strip()]
+        return parts or None
+
+    tag_list = _multi(tags) or _multi(tag)
+    if tag_list:
+        # tags stored lowercase; incoming may be Title-Case
+        q["tags"] = {"$in": [t.lower() for t in tag_list]}
+    inds = _multi(industry)
+    if inds:
+        q["industry"] = {"$in": inds}
     if company:
         q["company"] = company
+    countries = _multi(country)
+    if countries:
+        q["country"] = {"$in": countries}
+    states = _multi(state)
+    if states:
+        q["state"] = {"$in": states}
+    cities = _multi(city)
+    if cities:
+        q["city"] = {"$in": cities}
     if favorite is not None:
         q["favorite"] = favorite
     if search:
@@ -428,6 +477,30 @@ async def list_contacts(
                 d[k] = iso(d[k])
         items.append(d)
     return {"items": items, "count": len(items)}
+
+
+@api.get("/contacts/facets")
+async def list_contact_facets(user_id: str = Depends(get_current_user_id)):
+    """Distinct values for filter chips (countries, states, cities, industries, tags)."""
+    facets = {}
+    for field in ("country", "state", "city", "industry"):
+        cur = db.contacts.aggregate([
+            {"$match": {"user_id": user_id, field: {"$nin": ["", None]}}},
+            {"$group": {"_id": f"${field}", "count": {"$sum": 1}}},
+            {"$sort": {"count": -1}},
+            {"$limit": 50},
+        ])
+        facets[field] = [{"value": d["_id"], "count": d["count"]} async for d in cur]
+    # Tags array — unwind
+    cur = db.contacts.aggregate([
+        {"$match": {"user_id": user_id}},
+        {"$unwind": {"path": "$tags", "preserveNullAndEmptyArrays": False}},
+        {"$group": {"_id": "$tags", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 50},
+    ])
+    facets["tag"] = [{"value": d["_id"], "count": d["count"]} async for d in cur if d["_id"]]
+    return facets
 
 
 @api.get("/contacts/duplicates")
@@ -474,6 +547,8 @@ async def update_contact(contact_id: str, body: ContactUpdate, user_id: str = De
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     if not updates:
         raise HTTPException(400, "No fields to update")
+    if "tags" in updates:
+        updates["tags"] = _normalize_tags(updates["tags"])
     updates["updated_at"] = now()
     res = await db.contacts.update_one({"id": contact_id, "user_id": user_id}, {"$set": updates})
     if res.matched_count == 0:
@@ -529,9 +604,97 @@ async def ocr_scan(body: OcrIn, user_id: str = Depends(get_current_user_id)):
     try:
         data = await scan_business_card(body.image_b64)
         return data
+    except OcrError as e:
+        # Friendly, actionable message
+        raise HTTPException(422, str(e))
     except Exception as e:
         logger.exception("scan failed")
-        raise HTTPException(500, f"OCR failed: {e}")
+        raise HTTPException(
+            500,
+            "OCR service is temporarily unavailable. Please add the contact manually — we'll auto-fill what we can.",
+        )
+
+
+# ─────────────────────────  AI EMAIL ASSIST  ─────────────────────────
+class AiEmailIn(BaseModel):
+    action: str  # "generate" | "rewrite" | "shorten" | "expand" | "formalize" | "friendly"
+    prompt: Optional[str] = ""
+    subject: Optional[str] = ""
+    body: Optional[str] = ""
+    tone: Optional[str] = ""  # "professional" | "friendly" | "concise" | "persuasive"
+
+
+@api.post("/ai/write-email")
+async def write_email(body: AiEmailIn, user_id: str = Depends(get_current_user_id)):
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage
+    except Exception:
+        raise HTTPException(503, "AI service unavailable")
+    api_key = os.environ.get("EMERGENT_LLM_KEY")
+    if not api_key:
+        raise HTTPException(503, "AI service not configured")
+
+    action = (body.action or "generate").lower()
+    tone = body.tone or "professional"
+
+    if action == "generate":
+        instr = (
+            f"Write a {tone} outreach email (subject + body) for the following context. "
+            f"Keep it under 120 words. Address the recipient as {{name}} using a placeholder."
+        )
+        content = f"Context / user prompt:\n{body.prompt or 'General outreach — introduce yourself and propose a quick chat.'}"
+    elif action == "rewrite":
+        instr = f"Rewrite the following email in a more {tone} tone. Keep meaning intact."
+        content = f"Subject: {body.subject}\n\n{body.body}"
+    elif action == "shorten":
+        instr = "Shorten the following email to at most 60 words while keeping the ask clear."
+        content = f"Subject: {body.subject}\n\n{body.body}"
+    elif action == "expand":
+        instr = "Expand the following email with more detail, benefits and a clear call-to-action. Under 150 words."
+        content = f"Subject: {body.subject}\n\n{body.body}"
+    elif action in ("formalize", "friendly"):
+        target = "formal and professional" if action == "formalize" else "warm and friendly"
+        instr = f"Rewrite the email in a {target} tone."
+        content = f"Subject: {body.subject}\n\n{body.body}"
+    else:
+        raise HTTPException(400, "Unknown action")
+
+    prompt = f"""{instr}
+
+Return ONLY valid JSON with two keys — no code fences, no commentary:
+{{
+  "subject": "the email subject line",
+  "body": "the email body — plain text, one blank line between paragraphs, use {{name}} for the recipient placeholder"
+}}
+
+{content}
+"""
+    try:
+        chat = (
+            LlmChat(api_key=api_key, session_id=f"aiemail-{os.urandom(4).hex()}",
+                    system_message="You are an expert B2B copywriter. Return only JSON.")
+            .with_model("anthropic", "claude-haiku-4-5-20251001")
+        )
+        resp = await chat.send_message(UserMessage(text=prompt))
+        text = (resp or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```[a-zA-Z]*\n?", "", text)
+            text = re.sub(r"\n?```$", "", text)
+        try:
+            data = json.loads(text, strict=False)
+        except json.JSONDecodeError:
+            # Try to recover: extract first {...} block
+            m = re.search(r"\{.*\}", text, re.DOTALL)
+            if not m:
+                raise
+            data = json.loads(m.group(0), strict=False)
+        return {
+            "subject": str(data.get("subject", "") or ""),
+            "body": str(data.get("body", "") or ""),
+        }
+    except Exception as e:
+        logger.exception("AI write email failed")
+        raise HTTPException(500, f"AI generation failed: {e}")
 
 
 # ─────────────────────────  ENRICHMENT  ─────────────────────────
@@ -615,10 +778,26 @@ async def delete_template(template_id: str, user_id: str = Depends(get_current_u
 # ─────────────────────────  CAMPAIGNS  ─────────────────────────
 async def _resolve_recipients(user_id: str, body: CampaignIn) -> List[dict]:
     q: Dict[str, Any] = {"user_id": user_id}
-    if body.filter_tag:
-        q["tags"] = body.filter_tag
-    if body.filter_industry:
-        q["industry"] = body.filter_industry
+
+    tag_list = [t.lower() for t in (body.filter_tags or []) if t]
+    if body.filter_tag and body.filter_tag.lower() not in tag_list:
+        tag_list.append(body.filter_tag.lower())
+    if tag_list:
+        q["tags"] = {"$in": tag_list}
+
+    inds = [i for i in (body.filter_industries or []) if i]
+    if body.filter_industry and body.filter_industry not in inds:
+        inds.append(body.filter_industry)
+    if inds:
+        q["industry"] = {"$in": inds}
+
+    if body.filter_countries:
+        q["country"] = {"$in": body.filter_countries}
+    if body.filter_states:
+        q["state"] = {"$in": body.filter_states}
+    if body.filter_cities:
+        q["city"] = {"$in": body.filter_cities}
+
     contacts: List[dict] = []
     if body.recipient_ids:
         q_ids = {**q, "id": {"$in": body.recipient_ids}}

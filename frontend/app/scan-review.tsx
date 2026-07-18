@@ -39,6 +39,7 @@ const FIELDS: { key: keyof OcrData; label: string; placeholder: string; keyboard
   { key: "city", label: "City", placeholder: "San Francisco", icon: "map-outline" },
   { key: "state", label: "State", placeholder: "CA", icon: "map-outline" },
   { key: "country", label: "Country", placeholder: "USA", icon: "flag-outline" },
+  { key: "pincode", label: "Pincode", placeholder: "ZIP / PIN / postal code", keyboard: "number-pad", icon: "pin-outline" },
   { key: "industry", label: "Industry", placeholder: "Software", icon: "layers-outline" },
 ];
 

@@ -4,24 +4,27 @@ import { StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 import { Card, Screen } from "@/src/components/ui";
 import { useAuth } from "@/src/context/auth";
+import { useT } from "@/src/i18n";
 import { colors, radius, spacing, typography } from "@/src/theme";
 
 export default function SettingsScreen() {
   const router = useRouter();
   const { user, logout } = useAuth();
+  const t = useT();
 
   const items: { icon: any; label: string; onPress: () => void; testID: string }[] = [
-    { icon: "mail-outline", label: "Email sending (SMTP)", onPress: () => router.push("/settings/email"), testID: "settings-email" },
-    { icon: "document-text-outline", label: "Email templates", onPress: () => router.push("/settings/templates"), testID: "settings-templates" },
-    { icon: "copy-outline", label: "Duplicate contacts", onPress: () => router.push("/settings/duplicates"), testID: "settings-duplicates" },
-    { icon: "bar-chart-outline", label: "Analytics dashboard", onPress: () => router.push("/analytics"), testID: "settings-analytics" },
-    { icon: "information-circle-outline", label: "About CardVault", onPress: () => router.push("/settings/about"), testID: "settings-about" },
+    { icon: "mail-outline", label: t("settings_email"), onPress: () => router.push("/settings/email"), testID: "settings-email" },
+    { icon: "document-text-outline", label: t("settings_templates"), onPress: () => router.push("/settings/templates"), testID: "settings-templates" },
+    { icon: "copy-outline", label: t("settings_duplicates"), onPress: () => router.push("/settings/duplicates"), testID: "settings-duplicates" },
+    { icon: "bar-chart-outline", label: t("settings_analytics"), onPress: () => router.push("/analytics"), testID: "settings-analytics" },
+    { icon: "language-outline", label: t("settings_language"), onPress: () => router.push("/settings/language"), testID: "settings-language" },
+    { icon: "information-circle-outline", label: t("settings_about"), onPress: () => router.push("/settings/about"), testID: "settings-about" },
   ];
 
   return (
     <Screen scroll edges={["top"]} testID="settings-screen">
       <View style={styles.header}>
-        <Text style={typography.h2}>Settings</Text>
+        <Text style={typography.h2}>{t("settings_title")}</Text>
       </View>
 
       <Card style={styles.profileCard} testID="settings-profile-card">
@@ -56,7 +59,7 @@ export default function SettingsScreen() {
 
         <TouchableOpacity onPress={logout} style={styles.logoutBtn} testID="settings-logout-btn">
           <Ionicons name="log-out-outline" size={18} color={colors.danger} />
-          <Text style={{ color: colors.danger, fontWeight: "700", marginLeft: 8 }}>Sign out</Text>
+          <Text style={{ color: colors.danger, fontWeight: "700", marginLeft: 8 }}>{t("sign_out")}</Text>
         </TouchableOpacity>
       </View>
     </Screen>

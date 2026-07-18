@@ -40,8 +40,9 @@ export default function EditContact() {
         name: values.name, designation: values.designation, company: values.company,
         email: values.email, phone: values.phone, website: values.website,
         address: values.address, city: values.city, state: values.state, country: values.country,
+        pincode: values.pincode || "",
         industry: values.industry,
-        tags: (values.tags_str || "").split(",").map((t: string) => t.trim()).filter(Boolean),
+        tags: (values.tags_str || "").split(",").map((t: string) => t.trim().toLowerCase()).filter(Boolean),
       };
       await api(`/contacts/${id}`, { method: "PUT", body });
       router.back();
@@ -74,9 +75,11 @@ export default function EditContact() {
           <Input label="Website" value={values.website} onChangeText={(v) => set("website", v)} autoCapitalize="none" testID="edit-website-input" />
           <Input label="Address" value={values.address} onChangeText={(v) => set("address", v)} testID="edit-address-input" />
           <Input label="City" value={values.city} onChangeText={(v) => set("city", v)} testID="edit-city-input" />
+          <Input label="State" value={values.state} onChangeText={(v) => set("state", v)} testID="edit-state-input" />
           <Input label="Country" value={values.country} onChangeText={(v) => set("country", v)} testID="edit-country-input" />
+          <Input label="Pincode" placeholder="ZIP / PIN / postal code" keyboardType="number-pad" value={values.pincode || ""} onChangeText={(v) => set("pincode", v)} testID="edit-pincode-input" />
           <Input label="Industry" value={values.industry} onChangeText={(v) => set("industry", v)} testID="edit-industry-input" />
-          <Input label="Tags (comma separated)" value={values.tags_str} onChangeText={(v) => set("tags_str", v)} autoCapitalize="none" testID="edit-tags-input" />
+          <Input label="Tags (comma separated · case-insensitive)" value={values.tags_str} onChangeText={(v) => set("tags_str", v)} autoCapitalize="none" testID="edit-tags-input" />
           {err ? <Text style={{ color: colors.danger }} testID="edit-error">{err}</Text> : null}
           <View style={{ height: spacing.md }} />
           <Button title="Save changes" onPress={save} loading={saving} testID="edit-save-btn" />

@@ -58,7 +58,10 @@ export default function ScanScreen() {
         params: { data: JSON.stringify(data), image: `data:image/jpeg;base64,${compressed.base64}` },
       });
     } catch (e: any) {
-      setError(e?.message || "Scan failed. Try again.");
+      const msg =
+        e?.message ||
+        "We couldn't read this card. Try a clearer, well-lit photo — or add the contact manually.";
+      setError(msg);
     } finally {
       setBusy(false);
     }
@@ -166,7 +169,15 @@ export default function ScanScreen() {
 
       {error ? (
         <View style={styles.errorBanner} testID="scan-error-banner">
-          <Text style={{ color: "#fff", fontWeight: "600" }}>{error}</Text>
+          <Text style={{ color: "#fff", fontWeight: "600", marginBottom: 6 }}>{error}</Text>
+          <TouchableOpacity
+            onPress={() => router.replace("/contact/new")}
+            style={styles.errorCta}
+            testID="scan-error-manual-btn"
+          >
+            <Ionicons name="create-outline" size={14} color="#fff" />
+            <Text style={{ color: "#fff", fontWeight: "700", marginLeft: 4 }}>Add manually</Text>
+          </TouchableOpacity>
         </View>
       ) : null}
 
@@ -259,5 +270,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.danger,
     paddingHorizontal: spacing.md, paddingVertical: 10,
     borderRadius: radius.md,
+  },
+  errorCta: {
+    alignSelf: "flex-start",
+    flexDirection: "row", alignItems: "center",
+    backgroundColor: "rgba(255,255,255,0.15)",
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: radius.pill,
   },
 });

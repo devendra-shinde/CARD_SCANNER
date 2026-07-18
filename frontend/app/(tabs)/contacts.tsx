@@ -15,6 +15,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { Avatar, Card, Chip, EmptyState, getInitials, pickColor } from "@/src/components/ui";
+import { useT } from "@/src/i18n";
 import { api } from "@/src/lib/api";
 import { colors, radius, spacing, typography } from "@/src/theme";
 
@@ -23,23 +24,28 @@ type Contact = {
   email: string; phone: string; tags?: string[]; industry?: string; favorite?: boolean;
 };
 
-const FILTERS = [
-  { id: "all", label: "All" },
-  { id: "recent", label: "Recent" },
-  { id: "favorites", label: "Favorites" },
-  { id: "client", label: "Client" },
-  { id: "vip", label: "VIP" },
-  { id: "lead", label: "Lead" },
-] as const;
-
 export default function ContactsList() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const t = useT();
   const [items, setItems] = useState<Contact[]>([]);
+  const [dupIds, setDupIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<string>("all");
+
+  const FILTERS = useMemo(
+    () => [
+      { id: "all", label: t("filter_all") },
+      { id: "recent", label: t("filter_recent") },
+      { id: "favorites", label: t("filter_favorites") },
+      { id: "client", label: t("filter_client") },
+      { id: "vip", label: t("filter_vip") },
+      { id: "lead", label: t("filter_lead") },
+    ],
+    [t]
+  );
 
   const load = useCallback(async () => {
     try {
@@ -49,8 +55,14 @@ export default function ContactsList() {
       else if (filter !== "all" && filter !== "recent") params.set("tag", filter);
       if (filter === "recent") params.set("sort", "recent");
       const q = params.toString();
-      const res = await api<{ items: Contact[] }>(`/contacts${q ? "?" + q : ""}`);
+      const [res, dupRes] = await Promise.all([
+        api<{ items: Contact[] }>(`/contacts${q ? "?" + q : ""}`),
+        api<{ groups: { id: string }[][] }>("/contacts/duplicates").catch(() => ({ groups: [] })),
+      ]);
       setItems(res.items);
+      const ids = new Set<string>();
+      (dupRes.groups || []).forEach((g) => g.forEach((c) => ids.add(c.id)));
+      setDupIds(ids);
     } catch {} finally {
       setLoading(false);
     }
@@ -62,7 +74,6 @@ export default function ContactsList() {
 
   const grouped = useMemo(() => {
     if (filter === "recent") return items;
-    // Alphabetically by name
     return [...items].sort((a, b) => (a.name || a.company || "").localeCompare(b.name || b.company || ""));
   }, [items, filter]);
 
@@ -70,7 +81,7 @@ export default function ContactsList() {
     <View style={{ flex: 1, backgroundColor: colors.bg }} testID="contacts-screen">
       <View style={[styles.header, { paddingTop: insets.top + spacing.sm }]}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: spacing.md }}>
-          <Text style={typography.h2}>Contacts</Text>
+          <Text style={typography.h2}>{t("contacts_title")}</Text>
           <TouchableOpacity
             onPress={() => router.push("/contact/new")}
             style={styles.addBtn}
@@ -83,7 +94,7 @@ export default function ContactsList() {
         <View style={styles.searchWrap} testID="contacts-search-wrap">
           <Ionicons name="search" size={18} color={colors.textSecondary} />
           <TextInput
-            placeholder="Search by name, company, email..."
+            placeholder={t("contacts_search_placeholder")}
             placeholderTextColor={colors.textTertiary}
             value={search}
             onChangeText={setSearch}
@@ -123,9 +134,9 @@ export default function ContactsList() {
       ) : grouped.length === 0 ? (
         <EmptyState
           icon="people-outline"
-          title="No contacts found"
-          subtitle={search ? "Try a different search or filter." : "Scan your first card or add someone manually."}
-          action={{ label: "Add contact", onPress: () => router.push("/contact/new"), testID: "contacts-empty-add" }}
+          title={t("empty_no_contacts_title")}
+          subtitle={search ? t("contacts_empty_search") : t("empty_no_contacts_sub")}
+          action={{ label: t("quick_add_contact"), onPress: () => router.push("/contact/new"), testID: "contacts-empty-add" }}
           testID="contacts-empty-state"
         />
       ) : (
@@ -134,33 +145,42 @@ export default function ContactsList() {
           keyExtractor={(item) => item.id}
           contentContainerStyle={{ paddingHorizontal: spacing.lg, paddingBottom: 140, paddingTop: spacing.sm }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-          renderItem={({ item }) => (
-            <Card
-              onPress={() => router.push({ pathname: "/contact/[id]", params: { id: item.id } })}
-              style={{ marginBottom: spacing.sm, flexDirection: "row", alignItems: "center" }}
-              testID={`contact-item-${item.id}`}
-            >
-              <Avatar name={item.name || item.company} size={44} color={pickColor(item.id)} />
-              <View style={{ marginLeft: spacing.md, flex: 1 }}>
-                <View style={{ flexDirection: "row", alignItems: "center" }}>
-                  <Text style={typography.bodyStrong} numberOfLines={1}>{item.name || getInitials(item.company)}</Text>
-                  {item.favorite ? (
-                    <Ionicons name="star" size={14} color={colors.warning} style={{ marginLeft: 6 }} />
-                  ) : null}
+          renderItem={({ item }) => {
+            const isDup = dupIds.has(item.id);
+            return (
+              <Card
+                onPress={() => router.push({ pathname: "/contact/[id]", params: { id: item.id } })}
+                style={{ marginBottom: spacing.sm, flexDirection: "row", alignItems: "center" }}
+                testID={`contact-item-${item.id}`}
+              >
+                <Avatar name={item.name || item.company} size={44} color={pickColor(item.id)} />
+                <View style={{ marginLeft: spacing.md, flex: 1 }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap" }}>
+                    <Text style={typography.bodyStrong} numberOfLines={1}>{item.name || getInitials(item.company)}</Text>
+                    {item.favorite ? (
+                      <Ionicons name="star" size={14} color={colors.warning} style={{ marginLeft: 6 }} />
+                    ) : null}
+                    {isDup ? (
+                      <View style={styles.dupBadge} testID={`contact-dup-badge-${item.id}`}>
+                        <Ionicons name="copy-outline" size={10} color={colors.danger} />
+                        <Text style={styles.dupBadgeText}>{t("duplicate_badge")}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                  <Text style={[typography.small, { marginTop: 2 }]} numberOfLines={1}>
+                    {item.designation ? `${item.designation} · ` : ""}{item.company || item.email || item.phone}
+                  </Text>
                 </View>
-                <Text style={[typography.small, { marginTop: 2 }]} numberOfLines={1}>
-                  {item.designation ? `${item.designation} · ` : ""}{item.company || item.email || item.phone}
-                </Text>
-              </View>
-              {item.industry ? (
-                <View style={styles.tagPill}>
-                  <Text style={styles.tagText} numberOfLines={1}>{item.industry}</Text>
-                </View>
-              ) : (
-                <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
-              )}
-            </Card>
-          )}
+                {item.industry ? (
+                  <View style={styles.tagPill}>
+                    <Text style={styles.tagText} numberOfLines={1}>{item.industry}</Text>
+                  </View>
+                ) : (
+                  <Ionicons name="chevron-forward" size={18} color={colors.textTertiary} />
+                )}
+              </Card>
+            );
+          }}
         />
       )}
     </View>
@@ -209,5 +229,20 @@ const styles = StyleSheet.create({
   },
   tagText: {
     fontSize: 11, fontWeight: "700", color: "#065F46",
+  },
+  dupBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: colors.dangerSoft,
+    paddingHorizontal: 6, paddingVertical: 2,
+    borderRadius: radius.sm,
+    marginLeft: 6,
+    gap: 3,
+  },
+  dupBadgeText: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: colors.danger,
+    letterSpacing: 0.5,
   },
 });
