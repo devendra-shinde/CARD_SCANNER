@@ -59,7 +59,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refresh]);
 
   const signup = useCallback(async (p: { name: string; email: string; password: string; organization?: string; role?: string }) => {
-    await api("/auth/signup", { method: "POST", body: p, auth: false });
+    const resp = await api<{ dev_otp?: string }>("/auth/signup", { method: "POST", body: p, auth: false });
+    return { dev_otp: resp?.dev_otp };
   }, []);
 
   const verifyOtp = useCallback(async (email: string, otp: string) => {
@@ -74,7 +75,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const resendOtp = useCallback(async (email: string) => {
-    await api("/auth/resend-otp", { method: "POST", body: { email }, auth: false });
+    const resp = await api<{ dev_otp?: string }>("/auth/resend-otp", { method: "POST", body: { email }, auth: false });
+    return { dev_otp: resp?.dev_otp };
   }, []);
 
   const login = useCallback(async (email: string, password: string) => {
@@ -89,7 +91,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const forgotPassword = useCallback(async (email: string) => {
-    await api("/auth/forgot-password", { method: "POST", body: { email }, auth: false });
+    const resp = await api<{ dev_otp?: string }>("/auth/forgot-password", { method: "POST", body: { email }, auth: false });
+    return { dev_otp: resp?.dev_otp };
   }, []);
 
   const resetPassword = useCallback(async (email: string, otp: string, new_password: string) => {

@@ -27,14 +27,17 @@ export default function Signup() {
     setErr(null);
     setLoading(true);
     try {
-      await signup({
+      const { dev_otp } = await signup({
         name: name.trim(),
         email: email.trim().toLowerCase(),
         password,
         organization: org.trim(),
         role: role.trim(),
       });
-      router.push({ pathname: "/(auth)/verify-otp", params: { email: email.trim().toLowerCase() } });
+      router.push({
+        pathname: "/(auth)/verify-otp",
+        params: { email: email.trim().toLowerCase(), dev_otp: dev_otp || "" },
+      });
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : "Signup failed");
     } finally {

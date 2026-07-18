@@ -1,0 +1,35 @@
+{
+  "summary": "Verified the OTP-delivery bug fix end-to-end. Backend: added /app/backend/tests/test_dev_otp.py (9 tests, all passing) — signup, resend-otp, forgot-password all return `dev_otp` (6-digit numeric) when SYSTEM_SMTP_HOST is empty; login for an unverified user returns 403 with detail={message, dev_otp}; verify-otp with the returned dev_otp yields a valid access_token; reset-password with the forgot-password dev_otp resets the password (old rejected, new accepted); regression on /contacts CRUD, /analytics, /campaigns list still green. Frontend: welcome → signup (bug_<rand>@cardvault.dev) → verify-otp screen displays PREVIEW MODE banner (testID otp-dev-banner) with the code inline; tapping otp-dev-autofill-btn populated all six otp-input-{0..5} boxes; Verify email routed to the tabs dashboard (WELCOME BACK, Contacts=0, tab bar present). No errors surfaced.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Global (React Native Web)", "issues": ["Console warning: 'shadow*' style props are deprecated. Use 'boxShadow'. Also: 'props.pointerEvents is deprecated, use style.pointerEvents'. Both are RN Web-only cosmetic warnings, no functional impact — carried over from iteration 1."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_dev_otp.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "None for the OTP-delivery bug — fix is verified on both backend and frontend."
+  ],
+  "critical_code_review_comments": [
+    "dev_mode detection is a simple bool(env.SYSTEM_SMTP_HOST.strip()) — this is fine, but consider gating `dev_otp` exposure by an explicit APP_ENV=dev/preview flag so a misconfigured prod (empty SMTP by accident) doesn't leak OTPs. Currently: any deployment without SMTP returns OTPs in responses.",
+    "In /api/auth/login (server.py:302-306) the 403 detail is a dict when dev_mode else a string — clients must handle both shapes. Frontend auth.tsx should be checked to ensure ApiError parses dict details correctly (banner + prefill on login-403 path was not exercised in this frontend run since we routed via signup, but the shape was validated by the backend test)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_dev_otp.py (new)"
+  ],
+  "success_rate": {"backend": "100% (9/9 in test_dev_otp.py)", "frontend": "100% of the OTP dev-banner + autofill + verify → dashboard flow"},
+  "seed_data_creation": "Each backend test creates a fresh bug_<uuid>@cardvault.dev user via signup. Contacts created for regression are prefixed TEST_ and deleted by the test. Frontend test also created one fresh signup user (verified into DB, remains — no delete-account endpoint exists).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base URL: https://ocr-contacts-hub-1.preview.emergentagent.com. Run: `EXPO_BACKEND_URL=https://ocr-contacts-hub-1.preview.emergentagent.com pytest /app/backend/tests/test_dev_otp.py -v`. All 9 tests currently pass. For frontend, key testIDs on verify-otp: otp-dev-banner, otp-dev-autofill-btn, otp-input-0..5, otp-verify-btn, otp-resend-btn, otp-error. The SMTP-configured-regression case (setting SYSTEM_SMTP_HOST to a non-empty value and asserting dev_otp is absent) was skipped intentionally to avoid disrupting the shared preview env — code inspection at server.py:217,244,262,304,331,344 confirms dev_otp is only added when dev_mode is truthy.",
+  "rca_of_issue": "Original bug: signup users could not obtain OTPs because SYSTEM_SMTP_HOST is empty in /app/backend/.env and OTPs were only being written to backend logs. Fix (server.py + verify-otp.tsx + forgot-password.tsx + auth.tsx): when dev_mode (empty SMTP host) — return `dev_otp` in signup/resend-otp/forgot-password success bodies and in the login 403 `detail` dict; frontend surfaces it via a yellow 'PREVIEW MODE' banner with tap-to-autofill. Verified: backend 9/9 tests green, frontend banner visible + autofill works + verify email lands on dashboard."
+}

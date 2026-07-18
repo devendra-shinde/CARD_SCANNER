@@ -10,12 +10,14 @@ import { colors, radius, spacing, typography } from "@/src/theme";
 
 export default function VerifyOtp() {
   const router = useRouter();
-  const { email } = useLocalSearchParams<{ email: string }>();
+  const params = useLocalSearchParams<{ email: string; dev_otp?: string }>();
   const { verifyOtp, resendOtp } = useAuth();
   const [digits, setDigits] = useState<string[]>(["", "", "", "", "", ""]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const inputs = useRef<Array<TextInput | null>>([]);
+  const [devOtp, setDevOtp] = useState<string>((params.dev_otp as string) || "");
+  const [resending, setResending] = useState(false);
+  const inputs = useRef<(TextInput | null)[]>([]);
 
   const setDigit = (i: number, val: string) => {
     const v = val.replace(/[^0-9]/g, "").slice(0, 1);
@@ -29,13 +31,18 @@ export default function VerifyOtp() {
     if (!digits[i] && i > 0) inputs.current[i - 1]?.focus();
   };
 
+  const autofillDev = () => {
+    if (!devOtp || devOtp.length !== 6) return;
+    setDigits(devOtp.split(""));
+  };
+
   const onSubmit = async () => {
     const code = digits.join("");
     if (code.length !== 6) return setErr("Enter the 6-digit code");
     setErr(null);
     setLoading(true);
     try {
-      await verifyOtp(String(email), code);
+      await verifyOtp(String(params.email), code);
       router.replace("/(tabs)");
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : "Verification failed");
@@ -45,9 +52,16 @@ export default function VerifyOtp() {
   };
 
   const onResend = async () => {
+    setResending(true);
+    setErr(null);
     try {
-      await resendOtp(String(email));
-    } catch {}
+      const { dev_otp } = await resendOtp(String(params.email));
+      if (dev_otp) setDevOtp(dev_otp);
+    } catch (e) {
+      setErr(e instanceof ApiError ? e.message : "Could not resend");
+    } finally {
+      setResending(false);
+    }
   };
 
   return (
@@ -57,9 +71,30 @@ export default function VerifyOtp() {
           <Ionicons name="chevron-back" size={24} color={colors.textPrimary} />
         </TouchableOpacity>
         <Text style={typography.h1}>Enter verification code</Text>
-        <Text style={[typography.body, { color: colors.textSecondary, marginTop: spacing.xs, marginBottom: spacing.xl }]}>
-          We sent a 6-digit code to <Text style={{ fontWeight: "700", color: colors.textPrimary }}>{email}</Text>.
+        <Text style={[typography.body, { color: colors.textSecondary, marginTop: spacing.xs, marginBottom: spacing.lg }]}>
+          We sent a 6-digit code to <Text style={{ fontWeight: "700", color: colors.textPrimary }}>{params.email}</Text>.
         </Text>
+
+        {devOtp ? (
+          <View style={styles.devBanner} testID="otp-dev-banner">
+            <View style={styles.devBadge}>
+              <Ionicons name="construct-outline" size={14} color="#92400E" />
+              <Text style={styles.devBadgeText}>PREVIEW MODE</Text>
+            </View>
+            <Text style={styles.devTitle}>Email delivery isn&apos;t configured yet</Text>
+            <Text style={styles.devSub}>
+              No SMTP server is set for this environment, so we haven&apos;t emailed you.
+              Use this code to continue:
+            </Text>
+            <TouchableOpacity onPress={autofillDev} style={styles.devCodeBox} testID="otp-dev-autofill-btn" activeOpacity={0.85}>
+              <Text style={styles.devCode}>{devOtp}</Text>
+              <Text style={styles.devTap}>Tap to autofill</Text>
+            </TouchableOpacity>
+            <Text style={styles.devFooter}>
+              To send real emails in production, set SYSTEM_SMTP_HOST/PORT/USER/PASS in the backend .env file.
+            </Text>
+          </View>
+        ) : null}
 
         <View style={styles.otpRow}>
           {digits.map((d, i) => (
@@ -85,8 +120,10 @@ export default function VerifyOtp() {
         <View style={{ marginTop: spacing.xl }}>
           <Button title="Verify email" onPress={onSubmit} loading={loading} testID="otp-verify-btn" />
         </View>
-        <TouchableOpacity onPress={onResend} style={{ marginTop: spacing.lg, alignSelf: "center" }} testID="otp-resend-btn">
-          <Text style={{ color: colors.accent, fontWeight: "600" }}>Resend code</Text>
+        <TouchableOpacity onPress={onResend} disabled={resending} style={{ marginTop: spacing.lg, alignSelf: "center" }} testID="otp-resend-btn">
+          <Text style={{ color: colors.accent, fontWeight: "600" }}>
+            {resending ? "Sending…" : "Resend code"}
+          </Text>
         </TouchableOpacity>
       </KeyboardAvoidingView>
     </Screen>
@@ -109,4 +146,35 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     backgroundColor: colors.surface,
   },
+  devBanner: {
+    backgroundColor: "#FEF3C7",
+    borderWidth: 1, borderColor: "#FDE68A",
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  devBadge: {
+    flexDirection: "row", alignItems: "center",
+    alignSelf: "flex-start",
+    backgroundColor: "#FCD34D",
+    paddingHorizontal: 8, paddingVertical: 3,
+    borderRadius: radius.sm,
+    marginBottom: spacing.sm,
+  },
+  devBadgeText: { color: "#92400E", fontWeight: "700", fontSize: 10, marginLeft: 4, letterSpacing: 0.5 },
+  devTitle: { fontSize: 14, fontWeight: "700", color: "#92400E" },
+  devSub: { fontSize: 13, color: "#92400E", marginTop: 4, lineHeight: 18 },
+  devCodeBox: {
+    marginTop: spacing.sm,
+    backgroundColor: "#fff",
+    borderRadius: radius.md,
+    paddingVertical: 10,
+    alignItems: "center",
+    borderWidth: 1, borderColor: "#FDE68A",
+  },
+  devCode: {
+    fontSize: 30, fontWeight: "700", letterSpacing: 8, color: "#0F172A",
+  },
+  devTap: { fontSize: 11, color: "#92400E", marginTop: 2, fontWeight: "600" },
+  devFooter: { fontSize: 11, color: "#92400E", marginTop: spacing.sm, opacity: 0.85, lineHeight: 16 },
 });

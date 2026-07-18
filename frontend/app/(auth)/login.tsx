@@ -31,7 +31,13 @@ export default function Login() {
       const msg = e instanceof ApiError ? e.message : "Login failed";
       setErr(msg);
       if (e instanceof ApiError && e.status === 403) {
-        router.push({ pathname: "/(auth)/verify-otp", params: { email: email.trim().toLowerCase() } });
+        // Backend may return either a plain string detail or an object with dev_otp.
+        const detail = e.data?.detail;
+        const devOtp = typeof detail === "object" ? detail?.dev_otp : undefined;
+        router.push({
+          pathname: "/(auth)/verify-otp",
+          params: { email: email.trim().toLowerCase(), dev_otp: devOtp || "" },
+        });
       }
     } finally {
       setLoading(false);

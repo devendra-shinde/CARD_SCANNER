@@ -23,8 +23,13 @@ export default function ForgotPassword() {
     if (!email.trim()) return setErr("Enter your email");
     setLoading(true); setErr(null);
     try {
-      await forgotPassword(email.trim().toLowerCase());
-      setMsg("If the email exists, a reset code has been sent.");
+      const { dev_otp } = await forgotPassword(email.trim().toLowerCase());
+      if (dev_otp) {
+        setMsg(`Preview mode — reset code: ${dev_otp}`);
+        setOtp(dev_otp);
+      } else {
+        setMsg("If the email exists, a reset code has been sent.");
+      }
       setStep("reset");
     } catch (e) {
       setErr(e instanceof ApiError ? e.message : "Request failed");
