@@ -23,7 +23,10 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.emergent.ocrcontactshub.il4pkf",
-      "permissions": ["CAMERA", "READ_EXTERNAL_STORAGE"]
+      "permissions": [
+        "CAMERA",
+        "READ_EXTERNAL_STORAGE"
+      ]
     },
     "web": {
       "bundler": "metro",
@@ -52,7 +55,8 @@
         {
           "photosPermission": "Import business card photos from your library"
         }
-      ]
+      ],
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true

@@ -3,6 +3,7 @@ import { Image, StyleSheet, Text, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 
 import { Button, Screen } from "@/src/components/ui";
+import { GoogleAuthButton, OrDivider } from "@/src/components/google-auth-button";
 import { useT } from "@/src/i18n";
 import { colors, radius, spacing, typography } from "@/src/theme";
 
@@ -32,6 +33,8 @@ export default function Welcome() {
         <Text style={styles.subtitle}>{t("welcome_sub")}</Text>
 
         <View style={{ height: spacing.lg }} />
+        <GoogleAuthButton testID="welcome-google-btn" />
+        <OrDivider />
         <Button
           title={t("welcome_get_started")}
           onPress={() => router.push("/(auth)/signup")}

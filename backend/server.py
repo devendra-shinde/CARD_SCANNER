@@ -31,6 +31,9 @@ from email_utils import otp_email_html, send_smtp, send_system_email  # noqa: E4
 from enrich_utils import scrape_website  # noqa: E402
 from ocr_utils import OcrError, scan_business_card  # noqa: E402
 
+import httpx  # noqa: E402
+EMERGENT_SESSION_URL = "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data"
+
 
 def _normalize_tags(tags: list[str] | None) -> list[str]:
     """Lower-case + strip + de-dupe (preserves order)."""
@@ -403,6 +406,78 @@ async def me(user_id: str = Depends(get_current_user_id)):
         if isinstance(user.get(k), datetime):
             user[k] = iso(user[k])
     return user
+
+
+class GoogleSessionIn(BaseModel):
+    session_id: str
+
+
+@api.post("/auth/google-session")
+async def google_session(body: GoogleSessionIn):
+    """Emergent-managed Google Sign-In callback.
+
+    Frontend calls this with the session_id returned from Emergent's auth flow.
+    We verify with Emergent, upsert a user by email, then issue our own JWT so
+    the rest of the app (contacts, campaigns, etc.) keeps using one auth scheme.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=15) as cli:
+            r = await cli.get(EMERGENT_SESSION_URL, headers={"X-Session-ID": body.session_id})
+        if r.status_code != 200:
+            raise HTTPException(401, f"Session not recognised ({r.status_code})")
+        data = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Auth provider unreachable: {e}")
+
+    email = (data.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(400, "No email in session data")
+    name = data.get("name") or email.split("@")[0]
+    picture = data.get("picture") or ""
+
+    user = await db.users.find_one({"email": email})
+    if not user:
+        user_id = str(uuid.uuid4())
+        user = {
+            "id": user_id,
+            "name": name,
+            "email": email,
+            "password": "",              # OAuth user — no password
+            "organization": "",
+            "role": "",
+            "email_verified": True,
+            "provider": "google",
+            "avatar_url": picture,
+            "created_at": now(),
+            "updated_at": now(),
+        }
+        await db.users.insert_one(dict(user))
+    else:
+        await db.users.update_one({"id": user["id"]}, {"$set": {
+            "email_verified": True,
+            "avatar_url": picture or user.get("avatar_url", ""),
+            "provider": user.get("provider") or "google",
+            "updated_at": now(),
+        }})
+
+    token = make_access_token(user["id"])
+    return {
+        "access_token": token,
+        "token_type": "bearer",
+        "user": {
+            "id": user["id"],
+            "name": user["name"],
+            "email": user["email"],
+            "organization": user.get("organization", ""),
+            "role": user.get("role", ""),
+            "email_verified": True,
+            "avatar_url": picture or user.get("avatar_url", ""),
+            "provider": "google",
+            "created_at": iso(user["created_at"]) if isinstance(user.get("created_at"), datetime) else user.get("created_at", ""),
+        },
+    }
 
 
 # ─────────────────────────  CONTACTS  ──────────────────────────

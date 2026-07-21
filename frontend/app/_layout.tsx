@@ -8,6 +8,7 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { AuthProvider, useAuth } from "@/src/context/auth";
 import { useIconFonts } from "@/src/hooks/use-icon-fonts";
+import { consumePendingWebSession } from "@/src/lib/google-auth";
 import { I18nProvider, useI18n } from "@/src/i18n";
 
 LogBox.ignoreAllLogs(true);
@@ -19,10 +20,19 @@ LogBox.ignoreAllLogs(true);
 SplashScreen.preventAutoHideAsync();
 
 function RouterGate() {
-  const { user, loading } = useAuth();
+  const { user, loading, refresh } = useAuth();
   const { onboarded, ready: i18nReady } = useI18n();
   const segments = useSegments();
   const router = useRouter();
+
+  // On web, if we came back from Emergent auth with a session_id in the URL,
+  // consume it once, save the JWT, then reload the auth state.
+  useEffect(() => {
+    (async () => {
+      const consumed = await consumePendingWebSession();
+      if (consumed) await refresh();
+    })();
+  }, [refresh]);
 
   useEffect(() => {
     if (loading || !i18nReady) return;

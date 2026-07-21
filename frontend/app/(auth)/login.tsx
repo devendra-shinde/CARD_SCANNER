@@ -4,6 +4,7 @@ import { useState } from "react";
 import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 import { Button, Input, Screen } from "@/src/components/ui";
+import { GoogleAuthButton, OrDivider } from "@/src/components/google-auth-button";
 import { useAuth } from "@/src/context/auth";
 import { ApiError } from "@/src/lib/api";
 import { colors, spacing, typography } from "@/src/theme";
@@ -91,6 +92,8 @@ export default function Login() {
           {err ? <Text style={{ color: colors.danger, marginBottom: spacing.sm }} testID="login-error">{err}</Text> : null}
 
           <Button title="Sign in" onPress={onSubmit} loading={loading} testID="login-submit-btn" />
+          <OrDivider />
+          <GoogleAuthButton testID="login-google-btn" onSuccess={() => router.replace("/(tabs)")} />
           <View style={{ height: spacing.md }} />
           <View style={styles.row}>
             <Text style={{ color: colors.textSecondary }}>Don&apos;t have an account?</Text>

@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 5 — Emergent-managed Google Sign-In addition verified end-to-end. Backend: 11/11 pytest cases pass in /app/backend/tests/test_iteration5_google.py — new POST /api/auth/google-session returns 422 on empty/missing body, 401 with detail 'Session not recognised (401)' on session_id='BOGUS', and 400/401/422 (never 500) on session_id=''. Full auth regression is green: login (test2@cardvault.dev/pass1234), /auth/me, /auth/signup with dev_otp, /auth/verify-otp issuing JWT, wrong-password → 401, and contacts CRUD (POST→GET→PUT→GET→DELETE→GET 404) + /api/analytics (all 7 keys present). Frontend (mobile 390x844): welcome-google-btn is rendered above welcome-signup-btn (Get started) and welcome-login-btn (I already have an account) with an 'or' divider between; login-google-btn is rendered below login-submit-btn (Sign in) with an 'or' divider between. Tapping either Google button on web preview initiates a full-page navigation to `https://auth.emergentagent.com/?redirect=https%3A%2F%2Focr-contacts-hub-1.preview.emergentagent.com%2F` (intercepted via route to prove URL + redirect param) — no crash, no red screen, no console errors related to the button. Regression login still works: signing in as test2@cardvault.dev lands on the tabs home screen with Contacts/Scans/Campaigns/Emails cards and bottom tab bar. Only carried-over cosmetic RN-Web warnings ('shadow*' style props deprecated) plus an unrelated 403 on a static resource — nothing new from this change.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration5_google.py",
+    "/app/test_reports/pytest/pytest_iter5.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py is still ~1660 lines. This iteration added the Google endpoint + httpx import to the same monolith. Please split into routers/ (auth.py, contacts.py, billing.py, whatsapp.py, excel.py, email_accounts.py) at the next opportunity — same recommendation as iteration 4.",
+    "backend/server.py:411 — GoogleSessionIn.session_id is `str` with no min_length. Empty string still round-trips to Emergent's /auth/v1/env/oauth/session-data with X-Session-ID:'' — Emergent happens to respond 401/404 so the current 502 fallback never fires and users see a slightly confusing 401. Consider `session_id: str = Field(min_length=1)` so empty strings return a clean 422 up-front and only real network failures reach the 502 branch.",
+    "backend/server.py:432 — the 502 branch reveals the raw exception message via `f\"Auth provider unreachable: {e}\"`. For internal networking errors this is fine, but consider stripping stack details in production to avoid leaking Emergent-side internals to the client.",
+    "frontend/src/lib/google-auth.ts:44 — the redirect target for web is `window.location.origin + '/'`. This is correct for the current app, but if the app is ever mounted at a sub-path this needs to become `origin + pathname` or the Emergent redirect will drop the user at root and lose deep-link context.",
+    "frontend/src/lib/google-auth.ts:97 — consumePendingWebSession() swallows the failure silently (`try{} catch{}`) with only a URL cleanup. If a user lands with an invalid ?session_id= the app will just quietly stay logged out with no toast/log — consider surfacing a one-time error banner so users know the Google callback failed."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (11/11 in test_iteration5_google.py)",
+    "frontend": "100% — welcome-google-btn + login-google-btn render with 'or' dividers; both initiate the Emergent auth URL with correct ?redirect= param and do not crash; email/password regression login still succeeds and lands on tabs."
+  },
+  "seed_data_creation": "Test suite creates one TEST_g_*@cardvault.dev signup + verify-otp user per run (no delete-user endpoint available) and one TEST_gauth contact that is deleted at end of the CRUD test.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base URL: https://ocr-contacts-hub-1.preview.emergentagent.com/api. Frontend .env uses EXPO_PUBLIC_BACKEND_URL (not EXPO_BACKEND_URL). Test users unchanged (pass1234): test2@cardvault.dev (free), basictester@cardvault.dev (basic), p2@cardvault.dev (pro). Google Sign-In cannot be completed end-to-end (needs a real Google user + real Emergent session_id) — verify only that (1) POST /api/auth/google-session with any bogus session_id returns 401 'Session not recognised', and (2) the frontend Google buttons initiate navigation to https://auth.emergentagent.com/?redirect=<url-encoded frontend origin/>. To intercept without actually leaving the page, use `page.route('**/*', ...)` and abort requests to auth.emergentagent.com — the redirect URL will be captured in the request. testIDs: welcome-google-btn, login-google-btn.",
+  "rca_of_issue": "N/A — no bugs found this iteration; all 11 backend + all frontend checks passed on first run."
+}
