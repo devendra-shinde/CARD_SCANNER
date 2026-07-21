@@ -5,6 +5,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
 import { api, clearToken, setToken } from "@/src/lib/api";
+import { consumePendingWebSession } from "@/src/lib/google-auth";
 import { storage } from "@/src/utils/storage";
 
 export type AuthUser = {
@@ -53,6 +54,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     (async () => {
       const cached = await storage.getItem<AuthUser>(USER_KEY, null as any);
       if (cached) setUser(cached as AuthUser);
+      // On web, if we returned from Emergent auth with ?session_id= or
+      // #session_id= in the URL, exchange it for our JWT FIRST — before the
+      // initial /auth/me call. Otherwise the 401 from that call would race
+      // with the token being written and blow it away.
+      try { await consumePendingWebSession(); } catch { /* ignore */ }
       await refresh();
       setLoading(false);
     })();

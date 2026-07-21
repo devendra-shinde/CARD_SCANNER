@@ -2,7 +2,7 @@
  * "Continue with Google" button — reusable across welcome + login + signup.
  */
 import { Ionicons } from "@expo/vector-icons";
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from "react-native";
+import { ActivityIndicator, Alert, Platform, StyleSheet, Text, TouchableOpacity, View } from "react-native";
 
 import { useAuth } from "@/src/context/auth";
 import { useGoogleAuth } from "@/src/lib/google-auth";
@@ -17,6 +17,15 @@ export function GoogleAuthButton({ onSuccess, testID }: { onSuccess?: () => void
     if (res.ok) {
       await refresh();
       onSuccess?.();
+      return;
+    }
+    if (res.error && res.error !== "cancelled") {
+      if (Platform.OS === "web") {
+        // Alert.alert doesn't render on web — use window.alert
+        try { (globalThis as any).alert?.(`Google sign-in failed: ${res.error}`); } catch {}
+      } else {
+        Alert.alert("Google sign-in failed", res.error);
+      }
     }
   };
 

@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 6 — post-refactor backend regression + Excel-import perf + Google smoke. 32/32 tests pass in /app/backend/tests/test_iteration6.py (JUnit XML at /app/test_reports/pytest/pytest_iter6.xml). Full router surface exercised — root (/api/), auth (login, wrong-password 401, /auth/me with & without Bearer, signup echoing dev_otp, verify-otp, resend-otp, forgot-password + reset-password roundtrip, /auth/google-session bogus session_id → 401 as expected), contacts (CRUD + search + facets + duplicates + recipient-status), AI (OCR shape check w/ tolerant 200|422 on a blank JPEG, /ai/write-email accepts 200|402|503, /enrich empty body → 400), email-settings (legacy config roundtrip w/ smtp_pass redacted + invalid SMTP → 400 not 500, multi-account CRUD + /default + /test → 400), templates CRUD, campaigns create/list/get/send (send returns 200|400 with invalid SMTP as designed), analytics shape, billing (/billing/status, /billing/checkout → 503 as EXPECTED because RAZORPAY_KEY_ID is unset, /billing/history), Excel (template download, export, free-user import blocked with 402), WhatsApp (list ok for free, POST + generate-links return 402 for free — EXPECTED). Excel import-commit perf: uploaded a 36-row .xlsx against a `basictester` account with 15 pre-seeded contacts (varied emails + phones) — commit endpoint returned {total:36, imported:20, updated:16, failed:0} in 64.9 ms end-to-end (well under the <5s budget). The 16 updates split cleanly into 6 email-only duplicates + 6 phone-suffix duplicates + 4 in-file duplicates (second occurrence of a NEW row in the same upload correctly treated as an update via the in-memory phone_suffix_index/email_index update), proving the O(N+M) dedupe is intact. Google Sign-In backend smoke: POST /auth/google-session with `{\"session_id\":\"fake-bogus-value-xyz\"}` returned 401. No 5xx from any endpoint. Zero code changes required — only test-script tweaks (relaxed OCR assertion for a blank test JPEG, fetched plan via /billing/status because /auth/login response doesn't echo plan, and aligned facets keys to the actual response shape {country,state,city,industry,tag}).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "POST /api/auth/login",
+        "issue": "Response `user` object does not include `plan`. Frontend/tests wanting the plan have to make a second call to /billing/status or /auth/me. Not a bug per se, just a small ergonomic gap — including `plan` in the login response would remove a round-trip for the client on cold start."
+      },
+      {
+        "endpoint": "GET /api/contacts/facets",
+        "issue": "Response uses singular keys {country, state, city, industry, tag} — inconsistent with the plural convention seen in some other places. Consider renaming (breaking-change controlled) or documenting. Current shape is correct and working."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration6.py",
+    "/app/test_reports/pytest/pytest_iter6.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "backend/routes/excel.py:174 — good fix. The `existing.update(updates)` line is the key detail that makes subsequent in-file duplicates (that fall on the SAME already-matched contact) merge correctly against the freshly-persisted state without re-reading Mongo. Consider adding a small unit test on this specific path (row A updates contact X's designation, row B updates contact X's tags — final Mongo doc should hold both) so it isn't accidentally reverted.",
+    "backend/routes/excel.py:190-194 — when a NEW row is inserted, only email_index and phone_suffix_index are updated with the WHOLE `doc`. Because updates for subsequent in-file dup rows call `existing.update(updates)` on the same dict reference stored in the indexes, later in-file dups do see the merged state. That's correct but subtle — worth a code comment so a future reader doesn't 'optimize' by storing a copy.",
+    "backend/routes/excel.py:170 — merge logic uses `if v and not existing.get(k)` — this is FIRST-WRITER-WINS on fields other than tags. Deliberate for `notes`/`address` but may surprise users who expect the latest upload to overwrite. Confirm with product; if 'latest wins' is desired, drop the `not existing.get(k)` guard for non-tag fields.",
+    "backend/routes/auth.py — /auth/login response should include the user's `plan` (and ideally `subscription_current_period_end`) so the app can render the paywall on cold-start without a second /billing/status round-trip. Currently only `/auth/me` and `/billing/status` expose plan.",
+    "backend/schemas.py:42 — GoogleSessionIn.session_id has no `min_length=1`. Empty strings still round-trip to Emergent OAuth (which happens to reject them with 401) — same comment as iteration 5. Enforce `min_length=1` for a cleaner 422 up-front.",
+    "backend/server.py — refactor is clean (now ~55 lines). Every router mounted under `/api` prefix, CORS still permissive `*`. Consider tightening CORS to the actual frontend origin(s) before production."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration6.py (new)",
+    "/app/test_reports/pytest/pytest_iter6.xml (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (32/32 pytest cases)",
+    "frontend": "not tested this iteration (main agent said frontend testing was not needed)"
+  },
+  "seed_data_creation": "Each pytest run creates ~4 throwaway TEST_i6_*@cardvault.dev / TEST_i6r_*@cardvault.dev signup accounts (no delete-user endpoint exists) and cleans up all TEST_i6ex_* contacts after the Excel perf test. Standing credentials in /app/memory/test_credentials.md were not modified.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base URL is https://ocr-contacts-hub-1.preview.emergentagent.com/api (frontend .env key is EXPO_PUBLIC_BACKEND_URL). Shared test users (pass1234): test2@cardvault.dev (free), basictester@cardvault.dev (basic, needed for Excel/templates/campaigns), p2@cardvault.dev (pro, needed for WhatsApp). Login response does NOT include `plan` — call GET /billing/status if the plan is needed. Facets endpoint returns singular keys {country,state,city,industry,tag}. OCR endpoint may 422 on tiny/blank test images with detail 'We couldn't read this card automatically' — that is expected behaviour; use a real card photo if you need a 200. /billing/checkout is expected to return 503 (Razorpay unset) and /auth/google-session with any bogus session_id is expected to return 401. Excel import commit for a 36-row .xlsx against 15 seeded contacts runs in ~65 ms; if the next iteration adds features, keep the perf budget assertion at <5s in test_import_commit_correctness_and_perf.",
+  "rca_of_issue": "N/A — no bugs found this iteration. All modular routers respond exactly like the pre-refactor monolith, and the Excel commit dedupe correctness/perf both check out."
+}

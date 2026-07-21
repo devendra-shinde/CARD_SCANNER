@@ -101,3 +101,127 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+
+user_problem_statement: |
+  Business Card OCR & Smart Contact Management app (CardVault). Current iteration:
+  1) Fix Emergent-managed Google Sign-In (user reported it not working).
+  2) Optimize Excel import — replace O(N×M) phone-suffix dedupe with bulk in-memory index.
+  3) Refactor server.py (~1600 lines) into modular FastAPI APIRouters under /app/backend/routes/.
+
+backend:
+  - task: "Modular APIRouter refactor of server.py"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py + /app/backend/routes/*.py + /app/backend/deps.py + /app/backend/schemas.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Split the monolithic server.py into:
+              - deps.py       (Mongo client, logger, helpers, constants)
+              - schemas.py    (all Pydantic models)
+              - routes/auth.py, contacts.py, ai.py, email_settings.py,
+                templates.py, campaigns.py, analytics.py, billing.py,
+                excel.py, whatsapp.py
+              - server.py     (slim: mounts every router under /api + CORS)
+            Smoke tested manually: /, /auth/signup, /auth/verify-otp,
+            /auth/me, /contacts, /billing/status, /analytics all return
+            expected 2xx responses. Needs full regression by testing_agent.
+
+  - task: "Excel import performance — O(N×M) → O(N+M)"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/routes/excel.py (import_commit)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Import commit now scans the user's contacts ONCE and builds
+            in-memory email + phone-suffix indexes. Row lookups are O(1)
+            and newly inserted rows are also registered in the index so
+            duplicates INSIDE the same upload are treated as merges.
+
+  - task: "Emergent Google Sign-In backend endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/routes/auth.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: false
+    status_history:
+        - working: true
+          agent: "main"
+          comment: |
+            /auth/google-session endpoint unchanged from previous iteration
+            (already verified). The user reported the FRONTEND flow was not
+            working — the fix landed on the client side (race condition).
+
+frontend:
+  - task: "Emergent Google Sign-In frontend race condition"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/context/auth.tsx + /app/frontend/app/_layout.tsx + /app/frontend/src/components/google-auth-button.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        - working: false
+          agent: "user"
+          comment: "User said Google Sign-In does not work."
+        - working: "NA"
+          agent: "main"
+          comment: |
+            Root cause: race between AuthProvider mount (calls /auth/me,
+            gets 401, calls clearToken) and RouterGate's consumePendingWebSession
+            (writes the JWT). Depending on which finished last, the just-set
+            token was being wiped.
+
+            Fix: moved consumePendingWebSession INTO AuthProvider's mount
+            effect, running BEFORE the initial refresh() call. Removed the
+            duplicate call in RouterGate. Also surfaced non-cancellation
+            errors via Alert / window.alert on the GoogleAuthButton so
+            failures are no longer silent.
+
+metadata:
+  created_by: "main_agent"
+  version: "1.1"
+  test_sequence: 6
+  run_ui: false
+
+test_plan:
+  current_focus:
+    - "Modular APIRouter refactor of server.py"
+    - "Excel import performance — O(N×M) → O(N+M)"
+    - "Emergent Google Sign-In frontend race condition"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    - agent: "main"
+      message: |
+        Ran a big backend refactor + two targeted fixes. Please:
+        1) Regression-test the FULL backend surface (auth, contacts CRUD,
+           facets, duplicates, merge, recipient-status, OCR, AI, enrich,
+           SMTP settings + accounts, templates, campaigns, analytics,
+           billing status/checkout(503)/cancel/history, excel import
+           (preview + commit) + export + template, whatsapp templates
+           + generate-links). All endpoint paths and payloads are
+           unchanged — only file locations moved.
+        2) Verify the Excel import optimization: upload a workbook where
+           several rows collide by phone-only or email-only with existing
+           contacts, plus in-file duplicates. Confirm imported/updated/
+           duplicate_removed counts match expectations and the endpoint
+           doesn't time out.
+        3) On frontend, verify that on web preview, tapping "Continue
+           with Google" no longer silently fails. (Full OAuth roundtrip
+           can't be automated in the sandbox but at least confirm the
+           button surfaces an error dialog on failure and the auth
+           context correctly consumes ?session_id=/#session_id= in URL.)
+        Test creds live in /app/memory/test_credentials.md.
