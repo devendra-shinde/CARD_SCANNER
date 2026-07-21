@@ -110,7 +110,7 @@ export default function WhatsAppCampaignScreen() {
         </View>
       ) : null}
 
-      {!links ? (
+      {!links && isPro ? (
         <View style={{ flex: 1 }}>
           <ScrollView contentContainerStyle={{ padding: spacing.lg, paddingBottom: 140 }} keyboardShouldPersistTaps="handled">
             <Text style={typography.h3}>Message</Text>
