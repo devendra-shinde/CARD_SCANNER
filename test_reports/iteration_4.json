@@ -1,0 +1,42 @@
+{
+  "summary": "Iteration 4 — verified massive feature batch (Excel, Razorpay, WhatsApp deep-links, anti-spam quota, multi-account SMTP, variable rendering, plan gating). Backend: 16/16 in /app/backend/tests/test_iteration4.py PASS after fixing one real route-ordering bug (see rca_of_issue). Frontend (mobile 390x844): all requested testIDs render. On pro (p2@cardvault.dev): /settings shows settings-{plans,data,whatsapp,templates,email,duplicates,analytics,language,about} (9/9); /plans shows plans-{screen,basic,pro,cycle-monthly,cycle-yearly} (5/5); /data shows data-{screen,export-btn,template-btn,import-btn} (4/4); /whatsapp shows compose form (wa-body-input visible, wa-upgrade-card NOT rendered). On free (test2@cardvault.dev): /whatsapp shows wa-upgrade-card (Pro plan required banner) as expected — note the compose form is still visible below the banner but its Generate button is disabled. Backend gating verified: free user gets 402 for POST /contacts/export, POST /contacts/import/preview, POST /whatsapp/generate-links, POST /whatsapp/templates; basic user gets 200 + valid xlsx (PK zip header, 4KB+); import round-trip (template → preview → commit merge → commit skip) works with correct new/updated/failed counts and phone/email duplicate detection; /billing/status returns razorpay_configured=false with plan_details + daily_sent + remaining_today; /billing/checkout returns 503 while RAZORPAY keys unset; /billing/cancel sets plan=free; /contacts/recipient-status returns items[] with emails_sent_7d, remaining_weekly, blocked, last_emailed + plan/daily_sent/daily_cap; multi-account /settings/emails CRUD works, is_default flip clears other defaults, SMTP test with bad creds returns 400 (not 500); campaign send with {ContactName}/{CompanyName} variables completes with 200/400 (no 500); OCR returns 200 with pincode key on the tiny sample image (LLM occasionally returns 422 on blank images — accepted). NO deprecated Expo packages detected in the changed screens. Only cosmetic RN-Web console warnings persist (shadow*/pointerEvents deprecated) — carried over from prior iterations.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/whatsapp (free user)", "issues": ["The Pro-plan-required banner (wa-upgrade-card) is shown, but the compose form (Message textarea + Recipients list + Generate button) is also rendered right below it. The Generate button is inert for free users (backend returns 402), but visually the form still appears interactive. Consider hiding the form entirely or greying it out under the banner for a cleaner gating UX."]}
+    ],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4.py",
+    "/app/test_reports/pytest/pytest_iter4.xml"
+  ],
+  "action_items": [
+    "OPTIONAL FE polish: on /whatsapp for free/basic users, hide (or lock) the compose form under the wa-upgrade-card instead of showing both. Right now the form renders even when the user cannot use it."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now ~1600 lines with 10+ resource domains — please split into routers/ (routers/billing.py, routers/whatsapp.py, routers/excel.py, routers/email_accounts.py) before adding more features. Route-ordering bugs like the one caught this iteration become much less likely once each domain lives in its own APIRouter.",
+    "Route-ordering rule to enforce: any @api.get('/contacts/<static-name>') MUST be declared before @api.get('/contacts/{contact_id}'). I fixed /contacts/recipient-status this iteration by hoisting it above the parameterized route; add a lint-check or a comment near the {contact_id} handler so future statics don't repeat this trap.",
+    "/api/contacts/import/commit does an in-memory Python loop over ALL of the user's contacts for every imported row that carries a phone (server.py:1336 async for c in cur2 inside the row loop) — O(N × M) DB reads. For large imports this will be very slow. Consider building a phone-suffix → contact index once at the top of the function.",
+    "clean_doc()/response serializers strip _id — good. But db.email_accounts documents in POST /settings/emails still include the plaintext smtp_pass field in the returned JSON (server.py:1418-1419). GET redacts it but POST does not. Redact smtp_pass on POST too to avoid leaking a secret back through the network response.",
+    "WhatsApp variable substitution in _render_vars() supports {ContactName}/{CompanyName}/{Designation}/{City}/{Industry}. The frontend /whatsapp screen displays hint text listing {ContactName}, {CompanyName}, {Designation} only — worth expanding the hint or documenting the full list."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4.py (new — 16 pytest cases)",
+    "/app/backend/server.py (moved @api.get('/contacts/recipient-status') above /contacts/{contact_id} to fix path-collision → 404 bug; left a note comment at the old location)"
+  ],
+  "success_rate": {
+    "backend": "100% (16/16 in test_iteration4.py) after the route-ordering fix",
+    "frontend": "100% of requested testIDs render (9 settings + 5 plans + 4 data + wa-upgrade-card gating for free + wa-body-input for pro). Free/basic /whatsapp form-hiding is a UX polish only."
+  },
+  "seed_data_creation": "Tests create TEST_-prefixed contacts, email accounts, WA templates, and campaigns per class and delete them in try/finally. One fresh signup user (TEST_cancel_<hex>@cardvault.dev) is left in the DB for the billing/cancel scenario (no delete-account endpoint).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Base URL: https://ocr-contacts-hub-1.preview.emergentagent.com/api. Seeded users (pass1234): test2@cardvault.dev (free), basictester@cardvault.dev (basic), p2@cardvault.dev (pro). Run: `pytest /app/backend/tests/test_iteration4.py -v` — 16/16 in ~11s. Route-ordering: /contacts/recipient-status is a STATIC route and must stay above /contacts/{contact_id} (fixed in this iteration). Frontend first-run flow redirects to /settings/language on every fresh browser context — click 'Continue' once to progress, then navigate to /(auth)/login. Login testIDs: login-email-input, login-password-input, login-submit-btn (NOT login-email / login-submit). WhatsApp variable names supported by _render_vars are {ContactName}, {CompanyName}, {Designation}, {City}, {Industry} — earlier iterations & the /whatsapp hint text refer to some of these; do not use {Company} (won't substitute).",
+  "rca_of_issue": "BUG FOUND & FIXED: GET /api/contacts/recipient-status returned 404 'Contact not found' because @api.get('/contacts/{contact_id}') at server.py:539 was declared before @api.get('/contacts/recipient-status') at server.py:1460, so FastAPI captured 'recipient-status' as a contact_id. Reproduction: `curl -H 'Authorization: Bearer <basic_token>' <base>/api/contacts/recipient-status` → 404. Fix: moved the recipient_status handler above the /contacts/{contact_id} route (server.py:~539) and left a stub note at the old location. After `sudo supervisorctl restart backend`, the endpoint now returns 200 with the expected {items, plan, daily_sent, daily_cap, remaining_today} shape and pytest goes 16/16."
+}

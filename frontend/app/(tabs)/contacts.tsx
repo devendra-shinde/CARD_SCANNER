@@ -21,7 +21,8 @@ import { colors, radius, spacing, typography } from "@/src/theme";
 
 type Contact = {
   id: string; name: string; company: string; designation: string;
-  email: string; phone: string; tags?: string[]; industry?: string; favorite?: boolean;
+  email: string; phone: string; tags?: string[]; industry?: string;
+  favorite?: boolean; avatar_b64?: string;
 };
 
 export default function ContactsList() {
@@ -153,7 +154,7 @@ export default function ContactsList() {
                 style={{ marginBottom: spacing.sm, flexDirection: "row", alignItems: "center" }}
                 testID={`contact-item-${item.id}`}
               >
-                <Avatar name={item.name || item.company} size={44} color={pickColor(item.id)} />
+                <Avatar name={item.name || item.company} size={44} color={pickColor(item.id)} imageB64={item.avatar_b64} />
                 <View style={{ marginLeft: spacing.md, flex: 1 }}>
                   <View style={{ flexDirection: "row", alignItems: "center", flexWrap: "wrap" }}>
                     <Text style={typography.bodyStrong} numberOfLines={1}>{item.name || getInitials(item.company)}</Text>

@@ -1,6 +1,7 @@
 """CardVault backend — Business Card OCR & Smart Contact Management."""
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -136,6 +137,7 @@ class ContactIn(BaseModel):
     social_links: Dict[str, str] = {}
     source: str = "manual"
     image_b64: Optional[str] = None  # optional business card image
+    avatar_b64: Optional[str] = None  # face crop for profile picture
     favorite: bool = False
 
 
@@ -158,6 +160,7 @@ class ContactUpdate(BaseModel):
     company_size: Optional[str] = None
     social_links: Optional[Dict[str, str]] = None
     favorite: Optional[bool] = None
+    avatar_b64: Optional[str] = None
 
 
 class MergeIn(BaseModel):
@@ -208,6 +211,8 @@ class CampaignIn(BaseModel):
     # Legacy singletons kept for backward compat
     filter_tag: Optional[str] = None
     filter_industry: Optional[str] = None
+    attachments: List[Dict[str, str]] = []  # [{filename, mime_type, content_b64}]
+    email_account_id: Optional[str] = None
 
 
 # ─────────────────────  DB serialization helpers  ─────────────
@@ -531,6 +536,48 @@ async def find_duplicates(user_id: str = Depends(get_current_user_id)):
     return {"groups": groups}
 
 
+# NOTE: this static route MUST be declared before /contacts/{contact_id} so
+# FastAPI does not treat "recipient-status" as a contact id.
+@api.get("/contacts/recipient-status")
+async def recipient_status(user_id: str = Depends(get_current_user_id)):
+    """For every contact with an email, return quota info: emails_sent_7d, remaining, last_emailed."""
+    user = await db.users.find_one({"id": user_id}) or {}
+    seven_days_ago = now() - timedelta(days=7)
+    cur = db.contacts.find({"user_id": user_id, "email": {"$ne": ""}}, {"_id": 0})
+    items = []
+    async for c in cur:
+        email = c["email"].lower()
+        sent = await db.campaign_history.count_documents({
+            "user_id": user_id, "status": "sent",
+            "recipient_email": {"$regex": f"^{re.escape(email)}$", "$options": "i"},
+            "sent_at": {"$gte": seven_days_ago},
+        })
+        last = await db.campaign_history.find_one(
+            {"user_id": user_id, "status": "sent",
+             "recipient_email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}},
+            sort=[("sent_at", -1)],
+        )
+        items.append({
+            "contact_id": c["id"],
+            "email": c["email"],
+            "emails_sent_7d": sent,
+            "remaining_weekly": max(0, 3 - sent),
+            "blocked": sent >= 3,
+            "last_emailed": iso(last["sent_at"]) if last and isinstance(last.get("sent_at"), datetime) else None,
+        })
+    plan = get_effective_plan(user)
+    today = now().replace(hour=0, minute=0, second=0, microsecond=0)
+    daily_sent = await db.campaign_history.count_documents({"user_id": user_id, "status": "sent", "sent_at": {"$gte": today}})
+    cap = free_daily_limit(user)
+    return {
+        "items": items,
+        "plan": plan,
+        "daily_sent": daily_sent,
+        "daily_cap": cap,
+        "remaining_today": None if cap is None else max(0, cap - daily_sent),
+    }
+
+
 @api.get("/contacts/{contact_id}")
 async def get_contact(contact_id: str, user_id: str = Depends(get_current_user_id)):
     doc = await db.contacts.find_one({"id": contact_id, "user_id": user_id}, {"_id": 0})
@@ -838,6 +885,8 @@ async def create_campaign(body: CampaignIn, user_id: str = Depends(get_current_u
         "recipient_ids": [c["id"] for c in recipients],
         "recipient_emails": [c["email"] for c in recipients],
         "recipient_count": len(recipients),
+        "email_account_id": body.email_account_id,
+        "attachments": body.attachments,
         "status": "draft",
         "sent_count": 0,
         "failed_count": 0,
@@ -855,24 +904,63 @@ async def send_campaign(campaign_id: str, user_id: str = Depends(get_current_use
     campaign = await db.campaigns.find_one({"id": campaign_id, "user_id": user_id})
     if not campaign:
         raise HTTPException(404, "Campaign not found")
-    cfg = await db.email_configs.find_one({"user_id": user_id})
+    user = await db.users.find_one({"id": user_id}) or {}
+
+    # Choose SMTP config: preferred account_id, else default account, else legacy single-config
+    from plans import get_effective_plan, free_daily_limit  # local import to avoid cycles
+    cfg: Optional[dict] = None
+    if campaign.get("email_account_id"):
+        cfg = await db.email_accounts.find_one({"id": campaign["email_account_id"], "user_id": user_id})
+    if not cfg:
+        cfg = await db.email_accounts.find_one({"user_id": user_id, "is_default": True})
+    if not cfg:
+        cfg = await db.email_accounts.find_one({"user_id": user_id})
+    if not cfg:
+        cfg = await db.email_configs.find_one({"user_id": user_id})
     if not cfg:
         raise HTTPException(400, "No SMTP config — set one in Settings first")
+
+    plan = get_effective_plan(user)
+    daily_cap = free_daily_limit(user)
+    today_start = now().replace(hour=0, minute=0, second=0, microsecond=0)
+    daily_sent = await db.campaign_history.count_documents(
+        {"user_id": user_id, "status": "sent", "sent_at": {"$gte": today_start}}
+    )
 
     from_addr = cfg.get("from_name") or cfg["smtp_user"]
     sent = 0
     failed = 0
+    skipped_quota = 0
+    skipped_ratelimit = 0
     delivery: List[dict] = []
+    attachments = campaign.get("attachments") or []
 
-    for email in campaign["recipient_emails"]:
-        # anti-spam: max 3 campaigns per recipient per week
+    # Fetch full contact records for variable rendering
+    recips = []
+    async for c in db.contacts.find({"user_id": user_id, "id": {"$in": campaign["recipient_ids"]}}, {"_id": 0}):
+        recips.append(c)
+
+    for c in recips:
+        # Free trial daily quota
+        if daily_cap is not None and daily_sent >= daily_cap:
+            skipped_quota += 1
+            delivery.append({"email": c["email"], "status": "skipped_daily_quota"})
+            continue
+
+        # Anti-spam: max 3 emails per recipient in rolling 7 days
         one_week_ago = now() - timedelta(days=7)
         recent = await db.campaign_history.count_documents(
-            {"user_id": user_id, "recipient_email": email, "sent_at": {"$gte": one_week_ago}}
+            {"user_id": user_id, "status": "sent",
+             "recipient_email": {"$regex": f"^{re.escape(c['email'])}$", "$options": "i"},
+             "sent_at": {"$gte": one_week_ago}}
         )
         if recent >= 3:
-            delivery.append({"email": email, "status": "skipped_ratelimit"})
+            skipped_ratelimit += 1
+            delivery.append({"email": c["email"], "status": "skipped_ratelimit"})
             continue
+
+        subject_rendered = _render_vars(campaign["subject"], c)
+        body_rendered = _render_vars(campaign["body_html"], c)
 
         ok, err = send_smtp(
             host=cfg["smtp_host"],
@@ -880,34 +968,28 @@ async def send_campaign(campaign_id: str, user_id: str = Depends(get_current_use
             username=cfg["smtp_user"],
             password=cfg["smtp_pass"],
             from_addr=from_addr,
-            to=email,
-            subject=campaign["subject"],
-            html=campaign["body_html"],
+            to=c["email"],
+            subject=subject_rendered,
+            html=body_rendered,
             use_tls=bool(cfg.get("use_tls", True)),
+            attachments=attachments if attachments else None,
         )
+        rec = {
+            "id": str(uuid.uuid4()), "user_id": user_id,
+            "campaign_id": campaign_id, "recipient_email": c["email"],
+            "sent_at": now(),
+        }
         if ok:
             sent += 1
-            delivery.append({"email": email, "status": "sent"})
-            await db.campaign_history.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "campaign_id": campaign_id,
-                "recipient_email": email,
-                "status": "sent",
-                "sent_at": now(),
-            })
+            daily_sent += 1
+            rec["status"] = "sent"
+            delivery.append({"email": c["email"], "status": "sent"})
         else:
             failed += 1
-            delivery.append({"email": email, "status": "failed", "error": err})
-            await db.campaign_history.insert_one({
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "campaign_id": campaign_id,
-                "recipient_email": email,
-                "status": "failed",
-                "error": err,
-                "sent_at": now(),
-            })
+            rec["status"] = "failed"
+            rec["error"] = err
+            delivery.append({"email": c["email"], "status": "failed", "error": err})
+        await db.campaign_history.insert_one(rec)
 
     await db.campaigns.update_one(
         {"id": campaign_id, "user_id": user_id},
@@ -915,11 +997,17 @@ async def send_campaign(campaign_id: str, user_id: str = Depends(get_current_use
             "status": "sent",
             "sent_count": sent,
             "failed_count": failed,
+            "skipped_quota_count": skipped_quota,
+            "skipped_ratelimit_count": skipped_ratelimit,
             "sent_at": now(),
             "updated_at": now(),
         }},
     )
-    return {"ok": True, "sent": sent, "failed": failed, "delivery": delivery}
+    return {
+        "ok": True, "sent": sent, "failed": failed,
+        "skipped_daily_quota": skipped_quota, "skipped_ratelimit": skipped_ratelimit,
+        "plan": plan, "delivery": delivery,
+    }
 
 
 @api.get("/campaigns/{campaign_id}")
@@ -987,6 +1075,503 @@ async def analytics(user_id: str = Depends(get_current_user_id)):
 
 
 # ─────────────────────────  MOUNT  ─────────────────────────
+
+from fastapi import Response, UploadFile, File  # noqa: E402
+from plans import PLANS, get_effective_plan, has_feature, free_daily_limit, FREE_TRIAL_DAYS  # noqa: E402
+from excel_utils import build_export, build_template, parse_workbook  # noqa: E402
+
+RESERVED_VARS = ["ContactName", "CompanyName", "Designation", "City", "Industry"]
+
+
+def _render_vars(text: str, contact: dict) -> str:
+    """Replace {{Var}} placeholders with contact fields."""
+    if not text:
+        return text
+    m = {
+        "ContactName": contact.get("name") or "",
+        "CompanyName": contact.get("company") or "",
+        "Designation": contact.get("designation") or "",
+        "City": contact.get("city") or "",
+        "Industry": contact.get("industry") or "",
+    }
+    for k, v in m.items():
+        text = text.replace("{{" + k + "}}", str(v))
+        text = text.replace("{" + k + "}", str(v))
+    # Legacy {name} placeholder
+    text = text.replace("{name}", m["ContactName"])
+    return text
+
+
+# ─────────────────────────  SUBSCRIPTION / BILLING  ─────────────────────────
+@api.get("/billing/status")
+async def billing_status(user_id: str = Depends(get_current_user_id)):
+    user = await db.users.find_one({"id": user_id}) or {}
+    plan = get_effective_plan(user)
+    today_start = now().replace(hour=0, minute=0, second=0, microsecond=0)
+    daily_sent = await db.campaign_history.count_documents(
+        {"user_id": user_id, "status": "sent", "sent_at": {"$gte": today_start}}
+    )
+    daily_cap = free_daily_limit(user)
+    return {
+        "plan": plan,
+        "plan_details": PLANS[plan],
+        "trial_days": FREE_TRIAL_DAYS,
+        "daily_sent": daily_sent,
+        "daily_cap": daily_cap,  # None means unlimited
+        "remaining_today": (None if daily_cap is None else max(0, daily_cap - daily_sent)),
+        "subscription_current_period_end": iso(user["subscription_current_period_end"])
+            if isinstance(user.get("subscription_current_period_end"), datetime) else None,
+        "razorpay_configured": bool(os.environ.get("RAZORPAY_KEY_ID")),
+    }
+
+
+class CheckoutIn(BaseModel):
+    plan: str  # "basic" | "pro"
+    cycle: str  # "monthly" | "yearly"
+
+
+@api.post("/billing/checkout")
+async def billing_checkout(body: CheckoutIn, user_id: str = Depends(get_current_user_id)):
+    if body.plan not in ("basic", "pro") or body.cycle not in ("monthly", "yearly"):
+        raise HTTPException(400, "Invalid plan or cycle")
+    key_id = os.environ.get("RAZORPAY_KEY_ID", "")
+    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key_id or not key_secret:
+        raise HTTPException(
+            503,
+            "Razorpay is not configured. Add RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET to backend/.env."
+        )
+    try:
+        import razorpay  # type: ignore
+        rz = razorpay.Client(auth=(key_id, key_secret))
+        amount = PLANS[body.plan]["price_" + body.cycle] * 100  # paise
+        order = rz.order.create({
+            "amount": amount,
+            "currency": "INR",
+            "receipt": f"cv_{user_id[:8]}_{int(datetime.utcnow().timestamp())}",
+            "notes": {"user_id": user_id, "plan": body.plan, "cycle": body.cycle},
+        })
+        # Persist a pending order for the webhook to match on
+        await db.billing_orders.insert_one({
+            "id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "order_id": order["id"],
+            "plan": body.plan,
+            "cycle": body.cycle,
+            "amount": amount,
+            "status": "created",
+            "created_at": now(),
+        })
+        return {"order_id": order["id"], "amount": amount, "currency": "INR", "key_id": key_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("razorpay checkout failed")
+        raise HTTPException(500, f"Checkout failed: {e}")
+
+
+class VerifyPaymentIn(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    plan: str
+    cycle: str
+
+
+@api.post("/billing/verify")
+async def billing_verify(body: VerifyPaymentIn, user_id: str = Depends(get_current_user_id)):
+    key_secret = os.environ.get("RAZORPAY_KEY_SECRET", "")
+    if not key_secret:
+        raise HTTPException(503, "Razorpay not configured")
+    try:
+        import razorpay  # type: ignore
+        rz = razorpay.Client(auth=(os.environ["RAZORPAY_KEY_ID"], key_secret))
+        rz.utility.verify_payment_signature({
+            "razorpay_order_id": body.razorpay_order_id,
+            "razorpay_payment_id": body.razorpay_payment_id,
+            "razorpay_signature": body.razorpay_signature,
+        })
+    except Exception as e:
+        raise HTTPException(400, f"Invalid payment signature: {e}")
+    period_days = 30 if body.cycle == "monthly" else 365
+    period_end = now() + timedelta(days=period_days)
+    await db.users.update_one({"id": user_id}, {"$set": {
+        "plan": body.plan,
+        "subscription_cycle": body.cycle,
+        "subscription_id": body.razorpay_payment_id,
+        "subscription_current_period_end": period_end,
+        "updated_at": now(),
+    }})
+    await db.billing_orders.update_one(
+        {"order_id": body.razorpay_order_id},
+        {"$set": {"status": "paid", "payment_id": body.razorpay_payment_id, "paid_at": now()}},
+    )
+    return {"ok": True, "plan": body.plan, "period_end": iso(period_end)}
+
+
+@api.post("/billing/cancel")
+async def billing_cancel(user_id: str = Depends(get_current_user_id)):
+    await db.users.update_one({"id": user_id}, {"$set": {
+        "plan": "free",
+        "subscription_current_period_end": None,
+        "updated_at": now(),
+    }})
+    return {"ok": True}
+
+
+@api.get("/billing/history")
+async def billing_history(user_id: str = Depends(get_current_user_id)):
+    cur = db.billing_orders.find({"user_id": user_id, "status": "paid"}, {"_id": 0}).sort("paid_at", -1)
+    items = []
+    async for d in cur:
+        for k in ("created_at", "paid_at"):
+            if isinstance(d.get(k), datetime):
+                d[k] = iso(d[k])
+        items.append(d)
+    return {"items": items}
+
+
+# ─────────────────────────  EXCEL IMPORT / EXPORT  ─────────────────────────
+class ExportIn(BaseModel):
+    contact_ids: List[str] = []
+    search: Optional[str] = None
+    tag: Optional[str] = None
+    industry: Optional[str] = None
+    country: Optional[str] = None
+    state: Optional[str] = None
+    city: Optional[str] = None
+    favorite: Optional[bool] = None
+
+
+@api.post("/contacts/export")
+async def export_contacts(body: ExportIn, user_id: str = Depends(get_current_user_id)):
+    user = await db.users.find_one({"id": user_id}) or {}
+    if not has_feature(user, "excel_export"):
+        raise HTTPException(402, "Upgrade to Basic to unlock Excel export.")
+    q: Dict[str, Any] = {"user_id": user_id}
+    if body.contact_ids:
+        q["id"] = {"$in": body.contact_ids}
+    else:
+        if body.tag: q["tags"] = body.tag.lower()
+        if body.industry: q["industry"] = body.industry
+        if body.country: q["country"] = body.country
+        if body.state: q["state"] = body.state
+        if body.city: q["city"] = body.city
+        if body.favorite is not None: q["favorite"] = body.favorite
+        if body.search:
+            rx = {"$regex": body.search, "$options": "i"}
+            q["$or"] = [{"name": rx}, {"company": rx}, {"email": rx}, {"phone": rx}]
+    cur = db.contacts.find(q, {"_id": 0})
+    contacts = [c async for c in cur]
+    data = build_export(contacts)
+    b64 = base64.b64encode(data).decode("ascii")
+    return {
+        "filename": f"cardvault_contacts_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "count": len(contacts),
+        "content_b64": b64,
+    }
+
+
+@api.get("/contacts/import/template")
+async def import_template(user_id: str = Depends(get_current_user_id)):
+    data = build_template()
+    return {
+        "filename": "cardvault_import_template.xlsx",
+        "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "content_b64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+class ImportPreviewIn(BaseModel):
+    content_b64: str
+
+
+@api.post("/contacts/import/preview")
+async def import_preview(body: ImportPreviewIn, user_id: str = Depends(get_current_user_id)):
+    user = await db.users.find_one({"id": user_id}) or {}
+    if not has_feature(user, "excel_import"):
+        raise HTTPException(402, "Upgrade to Basic to unlock Excel import.")
+    try:
+        raw = base64.b64decode(body.content_b64)
+    except Exception:
+        raise HTTPException(400, "Invalid file payload")
+    rows, errors = parse_workbook(raw)
+
+    # Detect duplicates against existing user's contacts
+    existing_emails = set()
+    existing_phones = set()
+    cur = db.contacts.find({"user_id": user_id}, {"email": 1, "phone": 1, "_id": 0})
+    async for c in cur:
+        if c.get("email"):
+            existing_emails.add(c["email"].lower().strip())
+        if c.get("phone"):
+            digits = "".join(ch for ch in c["phone"] if ch.isdigit())
+            if len(digits) >= 7:
+                existing_phones.add(digits[-10:])
+
+    new_count = updated_count = skipped_count = failed_count = 0
+    preview: List[dict] = []
+    for r in rows:
+        row_out = {**r}
+        if r.get("_error"):
+            row_out["_action"] = "failed"
+            failed_count += 1
+        else:
+            is_dup = False
+            if r.get("email") and r["email"].lower().strip() in existing_emails:
+                is_dup = True
+            if not is_dup and r.get("phone"):
+                d = "".join(ch for ch in r["phone"] if ch.isdigit())
+                if len(d) >= 7 and d[-10:] in existing_phones:
+                    is_dup = True
+            if is_dup:
+                row_out["_action"] = "update"
+                updated_count += 1
+            else:
+                row_out["_action"] = "new"
+                new_count += 1
+        preview.append(row_out)
+    return {
+        "total": len(rows),
+        "new": new_count,
+        "updated": updated_count,
+        "skipped": skipped_count,
+        "failed": failed_count,
+        "errors": errors[:20],
+        "preview": preview[:200],
+    }
+
+
+class ImportCommitIn(BaseModel):
+    content_b64: str
+    duplicate_strategy: str = "merge"  # "merge" | "skip"
+
+
+@api.post("/contacts/import/commit")
+async def import_commit(body: ImportCommitIn, user_id: str = Depends(get_current_user_id)):
+    user = await db.users.find_one({"id": user_id}) or {}
+    if not has_feature(user, "excel_import"):
+        raise HTTPException(402, "Upgrade to Basic to unlock Excel import.")
+    try:
+        raw = base64.b64decode(body.content_b64)
+    except Exception:
+        raise HTTPException(400, "Invalid file payload")
+    rows, _errors = parse_workbook(raw)
+
+    imported = updated = skipped = failed = 0
+    for r in rows:
+        if r.get("_error"):
+            failed += 1
+            continue
+        # Find existing contact by email or phone
+        existing = None
+        if r.get("email"):
+            existing = await db.contacts.find_one({
+                "user_id": user_id, "email": {"$regex": f"^{re.escape(r['email'])}$", "$options": "i"},
+            })
+        if not existing and r.get("phone"):
+            digits = "".join(ch for ch in str(r["phone"]) if ch.isdigit())
+            if len(digits) >= 7:
+                suffix = digits[-10:]
+                # Search all contacts and match last 10 digits
+                cur2 = db.contacts.find({"user_id": user_id})
+                async for c in cur2:
+                    d2 = "".join(ch for ch in (c.get("phone") or "") if ch.isdigit())
+                    if len(d2) >= 7 and d2[-10:] == suffix:
+                        existing = c
+                        break
+        clean_row = {k: v for k, v in r.items() if not k.startswith("_")}
+        clean_row["tags"] = _normalize_tags(clean_row.get("tags", []))
+
+        if existing:
+            if body.duplicate_strategy == "skip":
+                skipped += 1
+                continue
+            # Merge — fill blanks in existing with values from row, and union tags
+            updates: Dict[str, Any] = {}
+            for k, v in clean_row.items():
+                if k == "tags":
+                    merged = list(dict.fromkeys((existing.get("tags") or []) + v))
+                    updates["tags"] = merged
+                elif v and not existing.get(k):
+                    updates[k] = v
+            if updates:
+                updates["updated_at"] = now()
+                await db.contacts.update_one({"id": existing["id"]}, {"$set": updates})
+            updated += 1
+        else:
+            doc = {
+                "id": str(uuid.uuid4()),
+                "user_id": user_id,
+                **clean_row,
+                "source": "import",
+                "favorite": False,
+                "social_links": {},
+                "created_at": now(),
+                "updated_at": now(),
+            }
+            await db.contacts.insert_one(doc)
+            imported += 1
+    return {
+        "total": len(rows),
+        "imported": imported,
+        "updated": updated,
+        "duplicate_removed": skipped,
+        "failed": failed,
+    }
+
+
+# ─────────────────────────  EMAIL ACCOUNTS (multi)  ─────────────────────────
+class EmailAccountIn(BaseModel):
+    label: str
+    provider: str
+    smtp_host: str
+    smtp_port: int = 587
+    smtp_user: str
+    smtp_pass: str
+    from_name: str = ""
+    reply_to: str = ""
+    use_tls: bool = True
+    is_default: bool = False
+
+
+@api.get("/settings/emails")
+async def list_email_accounts(user_id: str = Depends(get_current_user_id)):
+    cur = db.email_accounts.find({"user_id": user_id}, {"_id": 0, "smtp_pass": 0})
+    items = []
+    async for d in cur:
+        for k in ("created_at", "updated_at"):
+            if isinstance(d.get(k), datetime):
+                d[k] = iso(d[k])
+        items.append(d)
+    return {"items": items}
+
+
+@api.post("/settings/emails")
+async def add_email_account(body: EmailAccountIn, user_id: str = Depends(get_current_user_id)):
+    if body.is_default:
+        await db.email_accounts.update_many({"user_id": user_id}, {"$set": {"is_default": False}})
+    doc = body.model_dump()
+    doc.update({
+        "id": str(uuid.uuid4()), "user_id": user_id,
+        "created_at": now(), "updated_at": now(),
+    })
+    await db.email_accounts.insert_one(dict(doc))
+    return clean_doc(dict(doc))
+
+
+@api.delete("/settings/emails/{account_id}")
+async def delete_email_account(account_id: str, user_id: str = Depends(get_current_user_id)):
+    res = await db.email_accounts.delete_one({"id": account_id, "user_id": user_id})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@api.post("/settings/emails/{account_id}/default")
+async def set_default_email(account_id: str, user_id: str = Depends(get_current_user_id)):
+    await db.email_accounts.update_many({"user_id": user_id}, {"$set": {"is_default": False}})
+    res = await db.email_accounts.update_one({"id": account_id, "user_id": user_id}, {"$set": {"is_default": True}})
+    if res.matched_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+@api.post("/settings/emails/{account_id}/test")
+async def test_email_account(account_id: str, body: TestSmtpIn, user_id: str = Depends(get_current_user_id)):
+    cfg = await db.email_accounts.find_one({"id": account_id, "user_id": user_id})
+    if not cfg:
+        raise HTTPException(404, "Not found")
+    from_addr = cfg.get("from_name") or cfg["smtp_user"]
+    ok, err = send_smtp(
+        host=cfg["smtp_host"], port=int(cfg.get("smtp_port", 587)),
+        username=cfg["smtp_user"], password=cfg["smtp_pass"],
+        from_addr=from_addr, to=body.to,
+        subject="CardVault test email",
+        html="<p>Your CardVault SMTP configuration works ✔</p>",
+        text="Your CardVault SMTP configuration works.",
+        use_tls=bool(cfg.get("use_tls", True)),
+    )
+    if not ok:
+        raise HTTPException(400, f"SMTP test failed: {err}")
+    return {"ok": True}
+
+
+# ─────────────────────────  RECIPIENT QUOTA / STATUS  ─────────────────────────
+# (recipient_status handler moved above /contacts/{contact_id} to avoid path
+# collision — see the earlier declaration.)
+
+
+# ─────────────────────────  WHATSAPP TEMPLATES  ─────────────────────────
+class WaTemplateIn(BaseModel):
+    name: str
+    body: str
+
+
+@api.get("/whatsapp/templates")
+async def list_wa_templates(user_id: str = Depends(get_current_user_id)):
+    cur = db.wa_templates.find({"user_id": user_id}, {"_id": 0}).sort("created_at", -1)
+    items = []
+    async for d in cur:
+        for k in ("created_at", "updated_at"):
+            if isinstance(d.get(k), datetime):
+                d[k] = iso(d[k])
+        items.append(d)
+    return {"items": items}
+
+
+@api.post("/whatsapp/templates")
+async def create_wa_template(body: WaTemplateIn, user_id: str = Depends(get_current_user_id)):
+    user = await db.users.find_one({"id": user_id}) or {}
+    if not has_feature(user, "whatsapp_templates"):
+        raise HTTPException(402, "Upgrade to Pro to unlock WhatsApp features.")
+    doc = body.model_dump()
+    doc.update({"id": str(uuid.uuid4()), "user_id": user_id, "created_at": now(), "updated_at": now()})
+    await db.wa_templates.insert_one(dict(doc))
+    return clean_doc(dict(doc))
+
+
+@api.delete("/whatsapp/templates/{template_id}")
+async def delete_wa_template(template_id: str, user_id: str = Depends(get_current_user_id)):
+    res = await db.wa_templates.delete_one({"id": template_id, "user_id": user_id})
+    if res.deleted_count == 0:
+        raise HTTPException(404, "Not found")
+    return {"ok": True}
+
+
+class WaLinksIn(BaseModel):
+    body: str
+    contact_ids: List[str] = []
+
+
+@api.post("/whatsapp/generate-links")
+async def wa_generate_links(body: WaLinksIn, user_id: str = Depends(get_current_user_id)):
+    """Return per-contact wa.me links with personalized messages.
+
+    The client opens each link (wa.me) to send via the user's WhatsApp app —
+    no WhatsApp Business API required.
+    """
+    user = await db.users.find_one({"id": user_id}) or {}
+    if not has_feature(user, "whatsapp_campaign"):
+        raise HTTPException(402, "Upgrade to Pro to unlock WhatsApp campaigns.")
+    cur = db.contacts.find({"user_id": user_id, "id": {"$in": body.contact_ids}}, {"_id": 0})
+    from urllib.parse import quote
+    out = []
+    async for c in cur:
+        phone = "".join(ch for ch in (c.get("phone") or "") if ch.isdigit())
+        if not phone or len(phone) < 7:
+            continue
+        text = _render_vars(body.body, c)
+        out.append({
+            "contact_id": c["id"],
+            "name": c.get("name") or c.get("company") or c["phone"],
+            "phone": phone,
+            "url": f"https://wa.me/{phone}?text={quote(text)}",
+            "personalized": text,
+        })
+    return {"items": out, "count": len(out)}
+
 app.include_router(api)
 
 app.add_middleware(

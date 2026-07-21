@@ -116,6 +116,7 @@ export default function ScanReview() {
           ...values,
           source: "ocr",
           image_b64: null,
+          avatar_b64: (initial as any).avatar_b64 || null,
           social_links: (values as any)._socials || {},
         },
       });

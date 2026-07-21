@@ -27,6 +27,7 @@ type Contact = {
   linkedin: string; company_size: string;
   social_links: Record<string, string>;
   source: string; favorite: boolean;
+  avatar_b64?: string;
   created_at: string; updated_at: string;
 };
 
@@ -128,7 +129,7 @@ export default function ContactDetail() {
           </View>
 
           <View style={{ alignItems: "center", marginTop: spacing.md }}>
-            <Avatar name={contact.name || contact.company} size={88} />
+            <Avatar name={contact.name || contact.company} size={88} imageB64={contact.avatar_b64} />
             <Text style={[typography.h2, { color: "#fff", marginTop: spacing.md }]}>{contact.name || "—"}</Text>
             {contact.designation ? <Text style={{ color: "rgba(255,255,255,0.75)", marginTop: 4 }}>{contact.designation}</Text> : null}
             {contact.company ? <Text style={{ color: "rgba(255,255,255,0.75)", marginTop: 2 }}>{contact.company}</Text> : null}

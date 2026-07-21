@@ -227,9 +227,19 @@ export function SectionHeader({ title, action, testID }: { title: string; action
   );
 }
 
-export function Avatar({ name, size = 44, color }: { name: string; size?: number; color?: string }) {
+export function Avatar({ name, size = 44, color, imageB64 }: { name: string; size?: number; color?: string; imageB64?: string }) {
   const initials = getInitials(name);
   const bg = color || pickColor(name);
+  if (imageB64) {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { Image } = require("react-native");
+    return (
+      <Image
+        source={{ uri: `data:image/jpeg;base64,${imageB64}` }}
+        style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: bg }}
+      />
+    );
+  }
   return (
     <View
       style={{

@@ -21,6 +21,45 @@ from typing import Any, Dict, List
 
 from PIL import Image, ImageOps
 
+
+def _extract_avatar_b64(img: Image.Image) -> str | None:
+    """Try to find a face in the card image; if found, return a base64-cropped avatar.
+
+    Uses OpenCV's Haar cascade — reliable enough for headshots on cards. Falls back
+    to None if no face is found.
+    """
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        return None
+    try:
+        cv_img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        gray = cv2.cvtColor(cv_img, cv2.COLOR_BGR2GRAY)
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        cascade = cv2.CascadeClassifier(cascade_path)
+        faces = cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(60, 60))
+        if len(faces) == 0:
+            return None
+        # Pick largest face
+        x, y, w, h = max(faces, key=lambda f: f[2] * f[3])
+        # Expand box 25% and clamp
+        cx, cy = x + w // 2, y + h // 2
+        side = int(max(w, h) * 1.6)
+        half = side // 2
+        H, W = cv_img.shape[:2]
+        x0 = max(0, cx - half); y0 = max(0, cy - half)
+        x1 = min(W, cx + half); y1 = min(H, cy + half)
+        face = cv_img[y0:y1, x0:x1]
+        # Encode to JPEG base64
+        ok, buf = cv2.imencode(".jpg", face, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if not ok:
+            return None
+        return base64.b64encode(buf.tobytes()).decode("ascii")
+    except Exception:
+        return None
+
+
 logger = logging.getLogger("ocr")
 
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
@@ -249,14 +288,25 @@ async def _tesseract_extract(image_b64: str) -> Dict[str, Any] | None:
 
 async def scan_business_card(image_b64: str) -> Dict[str, Any]:
     """Main entry — tries vision first, tesseract second, raises OcrError last."""
+    # Also derive an avatar (face crop) from the card if we can.
+    try:
+        source_img = _decode_image(image_b64)
+        avatar_b64 = _extract_avatar_b64(source_img)
+    except Exception:
+        avatar_b64 = None
+
     # Primary — Claude vision
     vision_result = await _vision_extract(image_b64)
     if vision_result and (vision_result.get("name") or vision_result.get("email") or vision_result.get("phone") or vision_result.get("raw_text")):
+        if avatar_b64:
+            vision_result["avatar_b64"] = avatar_b64
         return vision_result
 
     # Fallback — tesseract
     ts_result = await _tesseract_extract(image_b64)
     if ts_result:
+        if avatar_b64:
+            ts_result["avatar_b64"] = avatar_b64
         return ts_result
 
     # Both failed — surface a friendly error

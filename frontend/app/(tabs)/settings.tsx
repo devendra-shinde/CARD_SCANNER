@@ -13,8 +13,11 @@ export default function SettingsScreen() {
   const t = useT();
 
   const items: { icon: any; label: string; onPress: () => void; testID: string }[] = [
+    { icon: "star-outline", label: "Plans & billing", onPress: () => router.push("/plans"), testID: "settings-plans" },
     { icon: "mail-outline", label: t("settings_email"), onPress: () => router.push("/settings/email"), testID: "settings-email" },
     { icon: "document-text-outline", label: t("settings_templates"), onPress: () => router.push("/settings/templates"), testID: "settings-templates" },
+    { icon: "cloud-upload-outline", label: "Import / Export (Excel)", onPress: () => router.push("/data"), testID: "settings-data" },
+    { icon: "logo-whatsapp", label: "WhatsApp campaign", onPress: () => router.push("/whatsapp"), testID: "settings-whatsapp" },
     { icon: "copy-outline", label: t("settings_duplicates"), onPress: () => router.push("/settings/duplicates"), testID: "settings-duplicates" },
     { icon: "bar-chart-outline", label: t("settings_analytics"), onPress: () => router.push("/analytics"), testID: "settings-analytics" },
     { icon: "language-outline", label: t("settings_language"), onPress: () => router.push("/settings/language"), testID: "settings-language" },
